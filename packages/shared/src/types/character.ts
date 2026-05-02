@@ -55,8 +55,17 @@ export interface CharacterExtensions {
 export interface RPGStatsConfig {
   /** Whether RPG stats are enabled for this character */
   enabled: boolean;
+  /** When true, each attribute carries voice/domain fields for the Disco Skills agent */
+  discoMode?: boolean;
   /** Custom attribute list (e.g. STR, DEX, CHA — user can rename/add/remove) */
-  attributes: Array<{ name: string; value: number }>;
+  attributes: Array<{
+    name: string;
+    value: number;
+    voice?: string;
+    description?: string;
+    /** Hex color used to tint the skill's blockquote in Disco Skills mode */
+    color?: string;
+  }>;
   /** Hit Points */
   hp: { value: number; max: number };
 }

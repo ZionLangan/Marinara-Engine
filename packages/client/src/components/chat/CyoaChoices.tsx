@@ -9,20 +9,32 @@ import { useGenerate } from "../../hooks/use-generate";
 import { useChatStore } from "../../stores/chat.store";
 import type { Message } from "@marinara-engine/shared";
 
+type SkillCheckMeta = {
+  skill: string;
+  color: string;
+  tier: string;
+  dc: number;
+  level: number;
+  percent: number;
+  blocked: boolean;
+};
+
 type CyoaChoice = {
   label: string;
   text: string;
+  skillCheck?: SkillCheckMeta | null;
 };
 
 interface Props {
   messages?: Message[];
 }
 
-function normalizeChoices(choices: CyoaChoice[]) {
+function normalizeChoices(choices: CyoaChoice[]): CyoaChoice[] {
   return choices
     .map((choice, index) => ({
       label: choice.label.trim() || `Choice ${index + 1}`,
       text: choice.text.trim(),
+      skillCheck: choice.skillCheck ?? null,
     }))
     .filter((choice) => choice.text.length > 0);
 }
@@ -59,13 +71,17 @@ export function CyoaChoices({ messages }: Props) {
   }, [persistedChoiceState, choices.length, isStreaming, setCyoaChoices]);
 
   const handleChoice = useCallback(
-    async (text: string) => {
+    async (choice: CyoaChoice) => {
       if (!activeChatId || isStreaming || isEditing) return;
       clearCyoaChoices();
       await generate({
         chatId: activeChatId,
         connectionId: null,
-        userMessage: text,
+        userMessage: choice.text,
+        pendingSkillCheck:
+          choice.skillCheck && !choice.skillCheck.blocked
+            ? { skill: choice.skillCheck.skill, tier: choice.skillCheck.tier }
+            : undefined,
       });
     },
     [activeChatId, isStreaming, isEditing, clearCyoaChoices, generate],
@@ -175,22 +191,60 @@ export function CyoaChoices({ messages }: Props) {
         </div>
       ) : (
         <div className="flex max-w-[85%] flex-wrap justify-center gap-2">
-          {choices.map((choice, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => handleChoice(choice.text)}
-              disabled={isStreaming}
-              className="group relative rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-4 py-2.5 text-left backdrop-blur-md transition-all hover:border-purple-400/40 hover:bg-purple-500/10 hover:shadow-lg hover:shadow-purple-500/5 active:scale-[0.98] disabled:opacity-50 dark:border-white/10 dark:bg-black/50"
-            >
-              <span className="block text-[0.6875rem] font-semibold text-purple-700 group-hover:text-purple-600 dark:text-purple-300/90 dark:group-hover:text-purple-200">
-                {choice.label}
-              </span>
-              <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-[var(--foreground)]/60 group-hover:text-[var(--foreground)]/80 dark:text-white/50 dark:group-hover:text-white/70">
-                {choice.text}
-              </span>
-            </button>
-          ))}
+          {choices.map((choice, i) => {
+            const sc = choice.skillCheck;
+            const isSkill = !!sc;
+            const isBlocked = sc?.blocked === true;
+            const skillColor = sc?.color ?? null;
+
+            return (
+              <button
+                key={i}
+                type="button"
+                onClick={() => handleChoice(choice)}
+                disabled={isStreaming || isBlocked}
+                style={
+                  isSkill && skillColor
+                    ? ({
+                        "--skill-color": skillColor,
+                      } as React.CSSProperties)
+                    : undefined
+                }
+                className={[
+                  "group relative rounded-xl border px-4 py-2.5 text-left backdrop-blur-md transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
+                  isSkill
+                    ? "border-[color:var(--skill-color)]/30 bg-[color:var(--skill-color)]/5 hover:border-[color:var(--skill-color)]/50 hover:bg-[color:var(--skill-color)]/10 hover:shadow-lg"
+                    : "border-[var(--border)] bg-[var(--card)]/80 hover:border-purple-400/40 hover:bg-purple-500/10 hover:shadow-lg hover:shadow-purple-500/5 dark:border-white/10 dark:bg-black/50",
+                ].join(" ")}
+              >
+                <span
+                  className="block text-[0.6875rem] font-semibold"
+                  style={isSkill && skillColor ? { color: skillColor } : undefined}
+                >
+                  {!isSkill && (
+                    <span className="text-purple-700 group-hover:text-purple-600 dark:text-purple-300/90 dark:group-hover:text-purple-200">
+                      {choice.label}
+                    </span>
+                  )}
+                  {isSkill && choice.label}
+                </span>
+                {isSkill && sc && (
+                  <span className="mt-0.5 flex items-center gap-1.5 text-[0.5625rem] font-medium opacity-70">
+                    <span style={{ color: skillColor ?? undefined }}>{sc.skill}</span>
+                    <span className="text-[var(--foreground)]/40">·</span>
+                    <span className="text-[var(--foreground)]/60">{sc.tier}</span>
+                    <span className="text-[var(--foreground)]/40">·</span>
+                    <span style={{ color: skillColor ?? undefined }}>
+                      {isBlocked ? "BLOCKED" : `${sc.percent}%`}
+                    </span>
+                  </span>
+                )}
+                <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-[var(--foreground)]/60 group-hover:text-[var(--foreground)]/80 dark:text-white/50 dark:group-hover:text-white/70">
+                  {choice.text}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

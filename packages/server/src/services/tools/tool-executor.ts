@@ -36,6 +36,8 @@ export interface ToolExecutionContext {
   customTools?: CustomToolDef[];
   searchLorebook?: LorebookSearchFn;
   spotify?: SpotifyCredentials;
+  /** Lowercase skill name → level, injected for the disco-skills resolve_skill_check tool */
+  skillLevels?: Record<string, number>;
 }
 
 /**
@@ -85,6 +87,10 @@ async function executeSingleTool(
   switch (name) {
     case "roll_dice":
       return rollDice(args);
+    case "resolve_skill_check":
+      return resolveSkillCheck(args, context?.skillLevels);
+    case "preview_skill_check":
+      return previewSkillCheck(args, context?.skillLevels);
     case "update_game_state":
       return updateGameState(args, context?.gameState);
     case "set_expression":
@@ -211,6 +217,121 @@ function rollDice(args: Record<string, unknown>): Record<string, unknown> {
     total,
     reason,
     display: `🎲 ${notation}${reason ? ` (${reason})` : ""}: [${rolls.join(", ")}]${modifier ? ` ${modifier > 0 ? "+" : ""}${modifier}` : ""} = **${total}**`,
+  };
+}
+
+const DISCO_DIFFICULTIES = [
+  { name: "Trivial",     dc: 6,  minLevel: 1 },
+  { name: "Easy",        dc: 8,  minLevel: 2 },
+  { name: "Medium",      dc: 10, minLevel: 3 },
+  { name: "Challenging", dc: 12, minLevel: 4 },
+  { name: "Formidable",  dc: 13, minLevel: 5 },
+  { name: "Legendary",   dc: 14, minLevel: 6 },
+  { name: "Heroic",      dc: 15, minLevel: 7 },
+  { name: "Godly",       dc: 16, minLevel: 8 },
+  { name: "Impossible",  dc: 18, minLevel: 9 },
+] as const;
+
+function resolveSkillCheck(
+  args: Record<string, unknown>,
+  skillLevels?: Record<string, number>,
+): Record<string, unknown> {
+  const skillName = String(args.skill_name ?? "").trim();
+  const difficultyName = String(args.difficulty ?? "").trim();
+
+  const tier = DISCO_DIFFICULTIES.find((d) => d.name.toLowerCase() === difficultyName.toLowerCase());
+  if (!tier) {
+    return {
+      error: `Unknown difficulty tier: "${difficultyName}". Valid tiers: ${DISCO_DIFFICULTIES.map((d) => d.name).join(", ")}`,
+    };
+  }
+
+  const level = skillLevels?.[skillName.toLowerCase()];
+  if (level === undefined) {
+    return { skill: skillName, blocked: true, reason: "Skill not found on persona" };
+  }
+
+  if (level < tier.minLevel) {
+    return {
+      skill: skillName,
+      blocked: true,
+      reason: `Skill level ${level} is below the minimum ${tier.minLevel} required for ${tier.name} checks`,
+      level,
+      tier: tier.name,
+      dc: tier.dc,
+      min_required: tier.minLevel,
+    };
+  }
+
+  const roll1 = Math.floor(Math.random() * 6) + 1;
+  const roll2 = Math.floor(Math.random() * 6) + 1;
+  const rolls = [roll1, roll2];
+  const total = roll1 + roll2 + level;
+  const success = total >= tier.dc;
+
+  return {
+    skill: skillName,
+    blocked: false,
+    level,
+    tier: tier.name,
+    dc: tier.dc,
+    rolls,
+    total,
+    success,
+    display: `🎲 2d6+${level} (${skillName} · ${tier.name}): [${rolls.join(", ")}]+${level} = **${total}** vs DC ${tier.dc} — ${success ? "✅ Success" : "❌ Failed"}`,
+  };
+}
+
+/** 2d6 probability mass function: (sum → count of outcomes out of 36) */
+const D6_PMF: Record<number, number> = { 2:1, 3:2, 4:3, 5:4, 6:5, 7:6, 8:5, 9:4, 10:3, 11:2, 12:1 };
+
+function previewSkillCheck(
+  args: Record<string, unknown>,
+  skillLevels?: Record<string, number>,
+): Record<string, unknown> {
+  const skillName = String(args.skill_name ?? "").trim();
+  const difficultyName = String(args.difficulty ?? "").trim();
+
+  const tier = DISCO_DIFFICULTIES.find((d) => d.name.toLowerCase() === difficultyName.toLowerCase());
+  if (!tier) {
+    return {
+      error: `Unknown difficulty tier: "${difficultyName}". Valid tiers: ${DISCO_DIFFICULTIES.map((d) => d.name).join(", ")}`,
+    };
+  }
+
+  const level = skillLevels?.[skillName.toLowerCase()];
+  if (level === undefined) {
+    return { skill: skillName, blocked: true, reason: "Skill not found on persona", percent: 0 };
+  }
+
+  if (level < tier.minLevel) {
+    return {
+      skill: skillName,
+      blocked: true,
+      reason: `Skill level ${level} is below the minimum ${tier.minLevel} required for ${tier.name} checks`,
+      level,
+      tier: tier.name,
+      dc: tier.dc,
+      min_required: tier.minLevel,
+      percent: 0,
+    };
+  }
+
+  // Count outcomes where 2d6 + level >= dc
+  let successCount = 0;
+  for (const [sum, count] of Object.entries(D6_PMF)) {
+    if (Number(sum) + level >= tier.dc) successCount += count;
+  }
+  const percent = Math.round((successCount / 36) * 100);
+
+  return {
+    skill: skillName,
+    blocked: false,
+    level,
+    tier: tier.name,
+    dc: tier.dc,
+    min_required: tier.minLevel,
+    percent,
   };
 }
 

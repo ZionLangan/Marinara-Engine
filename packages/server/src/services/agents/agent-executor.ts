@@ -883,7 +883,7 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
   }
 
   if (context.memory._lastCyoaChoices) {
-    const lastChoices = context.memory._lastCyoaChoices as Array<{ label: string; text: string }>;
+    const lastChoices = context.memory._lastCyoaChoices as Array<{ label: string; text: string; skillCheck?: unknown }>;
     parts.push(`<previous_cyoa_choices>`);
     parts.push(
       `These are the choices you generated last time. Do NOT repeat them — provide fresh, meaningfully different options.`,
@@ -927,7 +927,9 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   "knowledge-retrieval": "context_injection",
   haptic: "haptic_command",
   cyoa: "cyoa_choices",
+  "cyoa-skills": "cyoa_choices",
   "secret-plot-driver": "secret_plot",
+  "disco-skills": "context_injection",
 };
 
 /** Agents that return structured JSON. */
@@ -951,6 +953,7 @@ const JSON_AGENTS = new Set([
   "editor",
   "haptic",
   "cyoa",
+  "cyoa-skills",
   "secret-plot-driver",
 ]);
 

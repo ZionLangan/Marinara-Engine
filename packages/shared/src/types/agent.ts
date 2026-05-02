@@ -33,6 +33,7 @@ export type AgentResultType =
   | "spotify_control"
   | "haptic_command"
   | "cyoa_choices"
+  | "cyoa_skill_choices"
   | "secret_plot"
   | "game_master_narration"
   | "party_action"
@@ -176,9 +177,11 @@ export const BUILT_IN_AGENT_IDS = {
   CUSTOM_TRACKER: "custom-tracker",
   HAPTIC: "haptic",
   CYOA: "cyoa",
+  CYOA_SKILLS: "cyoa-skills",
   SECRET_PLOT_DRIVER: "secret-plot-driver",
   GAME_MASTER: "game-master",
   PARTY_PLAYER: "party-player",
+  DISCO_SKILLS: "disco-skills",
 } as const;
 
 export type AgentCategory = "writer" | "tracker" | "misc";
@@ -443,6 +446,15 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     category: "misc",
   },
   {
+    id: "cyoa-skills",
+    name: "CYOA Skill Checks",
+    description:
+      "Generates 5 interactive choices after each assistant message — 2 of which are active Disco-style skill checks with pre-rolled odds. Requires a persona with Disco Skills enabled. Mutually exclusive with CYOA Choices.",
+    phase: "post_processing",
+    enabledByDefault: false,
+    category: "misc",
+  },
+  {
     id: "secret-plot-driver",
     name: "Secret Plot Driver",
     description:
@@ -472,6 +484,16 @@ export const BUILT_IN_AGENTS: BuiltInAgentMeta[] = [
     phase: "parallel",
     enabledByDefault: false,
     category: "misc",
+  },
+  {
+    id: "disco-skills",
+    name: "Disco Skills",
+    description:
+      "Injects the persona's skill voices and check instructions into the main prompt. The writer model rolls checks inline via resolve_skill_check, weaving italicised skill thoughts directly into the prose.",
+    phase: "pre_generation",
+    enabledByDefault: false,
+    defaultInjectAsSection: true,
+    category: "writer",
   },
 ];
 
@@ -536,6 +558,7 @@ export const DEFAULT_AGENT_TOOLS: Record<string, string[]> = {
   "secret-plot-driver": [],
   "game-master": ["roll_dice", "update_game_state"],
   "party-player": [],
+  "disco-skills": [],
 };
 
 /** Data shape for a lorebook_update agent result. */
@@ -689,6 +712,40 @@ export const BUILT_IN_TOOLS: ToolDefinition[] = [
         reason: { type: "string", description: "Why the roll is being made (e.g. 'Perception check')" },
       },
       required: ["notation"],
+    },
+  },
+  {
+    name: "resolve_skill_check",
+    description:
+      "Resolve a Disco Skills check for a named skill at a named difficulty tier. The server looks up the persona's skill level, applies the minimum-level threshold, rolls 2d6+level if qualified, and returns the result. Returns blocked:true if the skill level is too low for the chosen tier.",
+    parameters: {
+      type: "object",
+      properties: {
+        skill_name: { type: "string", description: "Exact skill name as listed in the persona's Attributes (case-insensitive)" },
+        difficulty: {
+          type: "string",
+          description: "Difficulty tier name",
+          enum: ["Trivial", "Easy", "Medium", "Challenging", "Formidable", "Legendary", "Heroic", "Godly", "Impossible"],
+        },
+      },
+      required: ["skill_name", "difficulty"],
+    },
+  },
+  {
+    name: "preview_skill_check",
+    description:
+      "Preview the success probability for a Disco Skills check WITHOUT rolling. Returns the percentage chance of success (0–100) based on the persona's skill level and the chosen difficulty tier. Use this to populate CYOA skill-check choices BEFORE the user commits.",
+    parameters: {
+      type: "object",
+      properties: {
+        skill_name: { type: "string", description: "Exact skill name as listed in the persona's Attributes (case-insensitive)" },
+        difficulty: {
+          type: "string",
+          description: "Difficulty tier name",
+          enum: ["Trivial", "Easy", "Medium", "Challenging", "Formidable", "Legendary", "Heroic", "Godly", "Impossible"],
+        },
+      },
+      required: ["skill_name", "difficulty"],
     },
   },
   {

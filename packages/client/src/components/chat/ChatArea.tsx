@@ -257,6 +257,7 @@ export function ChatArea() {
       nameColor?: string;
       dialogueColor?: string;
       boxColor?: string;
+      personaStats?: string;
     }>;
     // Prefer per-chat personaId, fall back to globally active persona
     // (Game mode skips the fallback — persona must be explicitly selected)
@@ -279,6 +280,40 @@ export function ChatArea() {
         /* ignore malformed JSON */
       }
     }
+    // Build the disco-skills color map (slug → hex) when the persona is
+    // configured for Disco Skills mode. Slugs match the markdown renderer.
+    let discoSkillColors: Record<string, string> | undefined;
+    if (persona.personaStats) {
+      try {
+        const pStats = JSON.parse(persona.personaStats) as {
+          rpgStats?: {
+            enabled?: boolean;
+            discoMode?: boolean;
+            attributes?: Array<{ name: string; color?: string }>;
+          };
+        };
+        if (pStats.rpgStats?.enabled && pStats.rpgStats.discoMode && Array.isArray(pStats.rpgStats.attributes)) {
+          const map: Record<string, string> = {};
+          for (const attr of pStats.rpgStats.attributes) {
+            if (!attr?.name || !attr.color) continue;
+            const slug = attr.name
+              .toLowerCase()
+              .trim()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-+|-+$/g, "");
+            if (slug) map[slug] = attr.color;
+          }
+          if (Object.keys(map).length > 0) {
+            discoSkillColors = map;
+          } else {
+            console.warn("[disco-skills] discoMode is enabled but no skill colors could be built — check that attributes have color fields");
+          }
+        }
+      } catch {
+        /* ignore malformed personaStats */
+      }
+    }
+
     return {
       name: persona.name,
       description,
@@ -290,6 +325,7 @@ export function ChatArea() {
       nameColor: persona.nameColor || undefined,
       dialogueColor: persona.dialogueColor || undefined,
       boxColor: persona.boxColor || undefined,
+      discoSkillColors,
     };
   }, [allPersonas, chat]);
 

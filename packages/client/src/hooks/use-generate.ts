@@ -376,6 +376,7 @@ export function useGenerate() {
       mentionedCharacterNames?: string[];
       forCharacterId?: string;
       generationGuide?: string;
+      pendingSkillCheck?: { skill: string; tier: string } | null;
     }) => {
       // Prevent concurrent generations for the SAME chat — stops race conditions
       // where autonomous messaging + user input both fire generate at once.
@@ -597,7 +598,7 @@ export function useGenerate() {
 
         for await (const event of api.streamEvents(
           "/generate",
-          { ...params, userStatus, debugMode, streaming: transportStreaming },
+          { ...params, userStatus, debugMode, streaming: transportStreaming, pendingSkillCheck: params.pendingSkillCheck ?? null },
           abortController.signal,
         )) {
           switch (event.type) {
@@ -758,12 +759,12 @@ export function useGenerate() {
                   }
                 }
 
-                // Push CYOA choices to the dedicated store
-                if (result.agentType === "cyoa") {
+                // Push CYOA choices to the dedicated store (both plain and skill variants)
+                if (result.agentType === "cyoa" || result.agentType === "cyoa-skills") {
                   const d = result.data as Record<string, unknown>;
-                  const choices = (d.choices as Array<{ label: string; text: string }>) ?? [];
+                  const choices = (d.choices as Array<{ label: string; text: string; skillCheck?: unknown }>) ?? [];
                   if (choices.length > 0) {
-                    setCyoaChoices(choices);
+                    setCyoaChoices(choices as any);
                   }
                 }
               }
@@ -1527,6 +1528,11 @@ export function useGenerate() {
                   const reactions = (d.reactions as Array<{ characterName: string; reaction: string }>) ?? [];
                   for (const r of reactions) addEchoMessage(r.characterName, r.reaction);
                 }
+                if (result.agentType === "cyoa" || result.agentType === "cyoa-skills") {
+                  const d = result.data as Record<string, unknown>;
+                  const choices = (d.choices as Array<{ label: string; text: string; skillCheck?: unknown }>) ?? [];
+                  if (choices.length > 0) setCyoaChoices(choices as any);
+                }
                 if (result.resultType === "background_change") {
                   const bg = result.data as { chosen?: string | null };
                   if (bg.chosen) {
@@ -1679,6 +1685,7 @@ export function useGenerate() {
       addResult,
       addThoughtBubble,
       addEchoMessage,
+      setCyoaChoices,
       enqueuePendingCardUpdate,
       clearFailedAgentTypes,
       clearThoughtBubbles,
@@ -1848,6 +1855,20 @@ function formatAgentBubble(agentType: string, agentName: string, data: unknown):
 
     case "secret-plot-driver": {
       return `🎭 The roleplay is following a secret plotline…`;
+    }
+
+    case "cyoa-skills": {
+      const choices = (d.choices as Array<{ skillCheck?: { skill: string; percent: number; blocked: boolean } | null }>) ?? [];
+      const skillChoices = choices.filter((c) => c.skillCheck && !c.skillCheck.blocked);
+      if (skillChoices.length === 0) return `🎲 Skill check choices generated`;
+      return skillChoices.map((c) => `🎲 ${c.skillCheck!.skill} — ${c.skillCheck!.percent}%`).join("\n");
+    }
+
+    case "disco-skills": {
+      const skillCount = typeof d.skillCount === "number" ? d.skillCount : 0;
+      return skillCount > 0
+        ? `🎲 Disco Skills primed (${skillCount} ${skillCount === 1 ? "voice" : "voices"})`
+        : `🎲 Disco Skills primed`;
     }
 
     default:

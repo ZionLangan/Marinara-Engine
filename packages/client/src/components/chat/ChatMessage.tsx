@@ -292,18 +292,24 @@ function renderContent(
   dialogueColor?: string,
   speakerColorMap?: Map<string, string>,
   boldDialogue = true,
+  discoSkillColors?: Record<string, string>,
 ): ReactNode {
   // Normalise curly quotes to straight so they display consistently
   const normalized = text.replace(/[“”„‟]/g, '"').replace(/[‘’]/g, "'");
 
-  // Strip speaker tags before HTML detection (they aren't real HTML)
-  const withoutSpeakerTags = normalized.replace(/<\/?speaker(?:="[^"]*")?>/g, "");
+  // Strip speaker and skill-check tags before HTML detection (they aren't real HTML)
+  const withoutSpeakerTags = normalized
+    .replace(/<\/?speaker(?:="[^"]*")?>/g, "")
+    .replace(/<\/?skill-check[^>]*>/gi, "");
 
   if (!HTML_TAG_RE.test(withoutSpeakerTags)) {
     // renderWithHeadings handles headings, *** and --- horizontal rules,
     // and delegates the rest to speaker-tag / dialogue rendering.
-    return renderMarkdownBlocks(normalized, (seg, _kp) =>
-      renderWithSpeakerTags(seg, dialogueColor, speakerColorMap, boldDialogue),
+    return renderMarkdownBlocks(
+      normalized,
+      (seg, _kp) => renderWithSpeakerTags(seg, dialogueColor, speakerColorMap, boldDialogue),
+      "md",
+      { discoSkillColors },
     );
   }
 
@@ -909,9 +915,10 @@ export const ChatMessage = memo(function ChatMessage({
   const text = typeof displayContent === "string" ? displayContent : message.content;
   const isHtmlContent = HTML_TAG_RE.test(text);
 
+  const discoSkillColors = personaInfo?.discoSkillColors;
   const renderedContent = useMemo(() => {
-    return renderContent(text, dialogueColor, speakerColorMap, boldDialogue);
-  }, [text, dialogueColor, speakerColorMap, boldDialogue]);
+    return renderContent(text, dialogueColor, speakerColorMap, boldDialogue, discoSkillColors);
+  }, [text, dialogueColor, speakerColorMap, boldDialogue, discoSkillColors]);
 
   const handleCopy = () => {
     copyToClipboard(message.content);

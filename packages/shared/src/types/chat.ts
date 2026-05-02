@@ -235,8 +235,22 @@ export interface MessageExtra {
   thinking?: string | null;
   /** Per-swipe sprite expressions from the Expression Engine agent */
   spriteExpressions?: Record<string, string> | null;
-  /** Per-swipe CYOA choices from the CYOA Choices agent */
-  cyoaChoices?: Array<{ label: string; text: string }> | null;
+  /** Per-swipe CYOA choices from the CYOA Choices or CYOA Skill Checks agent */
+  cyoaChoices?: Array<{
+    label: string;
+    text: string;
+    skillCheck?: {
+      skill: string;
+      color: string;
+      tier: string;
+      dc: number;
+      level: number;
+      percent: number;
+      blocked: boolean;
+    } | null;
+  }> | null;
+  /** Active skill check committed by the user on this message (drives the next generation) */
+  pendingSkillCheck?: { skill: string; tier: string } | null;
   /** Snapshot of the persona that was active when this message was sent (user messages only) */
   personaSnapshot?: {
     personaId: string;

@@ -31,6 +31,12 @@ export type PersonaInfo = {
   nameColor?: string;
   dialogueColor?: string;
   boxColor?: string;
+  /**
+   * Slug → hex color map of the persona's Disco Skills attributes (when
+   * `personaStats.rpgStats.discoMode` is enabled). Used by the chat markdown
+   * renderer to tint skill-check blockquotes per skill.
+   */
+  discoSkillColors?: Record<string, string>;
 };
 
 export type PeekPromptData = {

@@ -1046,10 +1046,32 @@ interface PersonaStatBar {
 interface PersonaRPGAttribute {
   name: string;
   value: number;
+  voice?: string;
+  description?: string;
+  /** Hex color used to tint this skill's blockquote in Disco Skills mode */
+  color?: string;
 }
+
+/** Default palette assigned to disco skills as new attributes are added. */
+const DEFAULT_DISCO_PALETTE = [
+  "#f97316", // orange
+  "#3b82f6", // blue
+  "#22c55e", // green
+  "#a855f7", // purple
+  "#ef4444", // red
+  "#06b6d4", // cyan
+  "#eab308", // yellow
+  "#ec4899", // pink
+  "#14b8a6", // teal
+  "#f59e0b", // amber
+];
+
+const pickPaletteColor = (i: number): string =>
+  DEFAULT_DISCO_PALETTE[i % DEFAULT_DISCO_PALETTE.length]!;
 
 interface PersonaRPGStats {
   enabled: boolean;
+  discoMode?: boolean;
   attributes: PersonaRPGAttribute[];
   hp: { value: number; max: number };
 }
@@ -1062,6 +1084,7 @@ interface PersonaStatsData {
 
 const DEFAULT_RPG_STATS: PersonaRPGStats = {
   enabled: false,
+  discoMode: false,
   attributes: [
     { name: "STR", value: 10 },
     { name: "DEX", value: 10 },
@@ -1133,7 +1156,11 @@ function PersonaStatsTab({
   };
 
   const addRpgAttribute = () => {
-    updateRpg({ attributes: [...rpgStats.attributes, { name: "NEW", value: 10 }] });
+    const nextIndex = rpgStats.attributes.length;
+    const next: PersonaRPGAttribute = rpgStats.discoMode
+      ? { name: "NEW", value: 10, color: pickPaletteColor(nextIndex) }
+      : { name: "NEW", value: 10 };
+    updateRpg({ attributes: [...rpgStats.attributes, next] });
   };
 
   const removeRpgAttribute = (index: number) => {
@@ -1278,6 +1305,93 @@ function PersonaStatsTab({
               </div>
             </div>
 
+            {/* Disco Skills toggle */}
+            <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+              <input
+                type="checkbox"
+                checked={rpgStats.discoMode ?? false}
+                onChange={(e) => {
+                  const turningOn = e.target.checked;
+                  // When enabling disco mode, auto-fill missing colors so every
+                  // skill renders with a distinct tint out of the box.
+                  if (turningOn) {
+                    const filled = rpgStats.attributes.map((a, idx) => ({
+                      ...a,
+                      color: a.color ?? pickPaletteColor(idx),
+                    }));
+                    updateRpg({ discoMode: true, attributes: filled });
+                  } else {
+                    updateRpg({ discoMode: false });
+                  }
+                }}
+                className="h-4 w-4 rounded accent-violet-500"
+              />
+              <div>
+                <p className="text-sm font-medium">Disco Skills Mode</p>
+                <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+                  Add a voice, description, and color to each skill. Used by the Disco Skills agent — not visible to the main LLM.
+                </p>
+              </div>
+            </label>
+
+            {/* Disco Skills explanation box */}
+            {rpgStats.discoMode && (
+              <div className="mt-3 rounded-xl bg-violet-500/10 p-4 ring-1 ring-violet-500/30 space-y-2">
+                <h4 className="text-xs font-semibold text-violet-300">How Disco Skills work</h4>
+                <p className="text-[0.6875rem] text-[var(--muted-foreground)] leading-relaxed">
+                  When the <strong className="text-[var(--foreground)]">Disco Skills agent</strong> is enabled on a
+                  chat, your skill voices and the check-system instructions are injected into the main prompt. The
+                  writer model itself calls <strong className="text-[var(--foreground)]">resolve_skill_check</strong>{" "}
+                  inline as it writes — the server rolls{" "}
+                  <strong className="text-[var(--foreground)]">2d6 + level</strong> against the difficulty DC, but only
+                  if the persona's skill meets the minimum level for that tier. Skill levels are hidden from the writer
+                  to prevent it from biasing tier choice.
+                </p>
+                <p className="text-[0.6875rem] text-[var(--muted-foreground)] leading-relaxed">
+                  Requires <strong className="text-[var(--foreground)]">tools enabled</strong> on the chat (Settings →
+                  Chat → Tools).
+                </p>
+                <div className="mt-1 rounded-lg bg-[var(--card)] p-3 space-y-1">
+                  <p className="text-[0.6875rem] font-semibold text-[var(--foreground)]">Difficulty tiers</p>
+                  <div className="grid grid-cols-3 gap-x-2 gap-y-0.5 text-[0.625rem] text-[var(--muted-foreground)] mt-1">
+                    <span className="font-medium text-[var(--foreground)]">Tier</span>
+                    <span className="font-medium text-[var(--foreground)]">DC</span>
+                    <span className="font-medium text-[var(--foreground)]">Min Level</span>
+                    <span>Trivial</span><span>6</span><span>1</span>
+                    <span>Easy</span><span>8</span><span>2</span>
+                    <span>Medium</span><span>10</span><span>3</span>
+                    <span>Challenging</span><span>12</span><span>4</span>
+                    <span>Formidable</span><span>13</span><span>5</span>
+                    <span>Legendary</span><span>14</span><span>6</span>
+                    <span>Heroic</span><span>15</span><span>7</span>
+                    <span>Godly</span><span>16</span><span>8</span>
+                    <span>Impossible</span><span>18</span><span>9</span>
+                  </div>
+                </div>
+                <div className="mt-1 rounded-lg bg-[var(--card)] p-3 space-y-1">
+                  <p className="text-[0.6875rem] font-semibold text-[var(--foreground)]">Recommended skill scale</p>
+                  <ul className="space-y-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">
+                    <li>&bull; <strong className="text-red-400">1–2</strong> — Novice. Only Trivial/Easy checks fire.</li>
+                    <li>&bull; <strong className="text-yellow-400">3–4</strong> — Capable. Fires up to Challenging.</li>
+                    <li>&bull; <strong className="text-emerald-400">5–6</strong> — Expert. Fires up to Legendary.</li>
+                    <li>&bull; <strong className="text-sky-400">7–9</strong> — Legendary tier. Unlocks Heroic → Impossible checks.</li>
+                  </ul>
+                  <p className="text-[0.6875rem] text-violet-400 mt-1">
+                    ⚠ The default value of&nbsp;10 is too high — it passes nearly every DC automatically. Use&nbsp;1–6
+                    for meaningful drama; 7–9 for truly exceptional skills.
+                  </p>
+                </div>
+                <p className="text-[0.6875rem] text-[var(--muted-foreground)] leading-relaxed">
+                  <strong className="text-[var(--foreground)]">Voice</strong> — the skill's personality as it speaks
+                  inside the character's mind (tone, affect, rhetorical style). Write a few sentences describing how it
+                  sounds and what it cares about.
+                  <br />
+                  <strong className="text-[var(--foreground)]">Description</strong> — what situations, topics, or
+                  narrative events activate this skill. Be broad: the agent uses this to judge relevance.
+                </p>
+              </div>
+            )}
+
             {/* Attributes */}
             <div className="mt-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -1295,26 +1409,72 @@ function PersonaStatsTab({
                 {rpgStats.attributes.map((attr, i) => (
                   <div
                     key={i}
-                    className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2"
+                    className="rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2 space-y-2"
                   >
-                    <input
-                      value={attr.name}
-                      onChange={(e) => updateRpgAttribute(i, "name", e.target.value)}
-                      className="w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs font-medium"
-                      placeholder="Name"
-                    />
-                    <input
-                      type="number"
-                      value={attr.value}
-                      onChange={(e) => updateRpgAttribute(i, "value", parseInt(e.target.value) || 0)}
-                      className="w-16 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-center text-xs"
-                    />
-                    <button
-                      onClick={() => removeRpgAttribute(i)}
-                      className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-red-500/15 hover:text-red-400"
-                    >
-                      <X size="0.75rem" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={attr.name}
+                        onChange={(e) => updateRpgAttribute(i, "name", e.target.value)}
+                        className="w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs font-medium"
+                        placeholder="Name"
+                      />
+                      <input
+                        type="number"
+                        value={attr.value}
+                        onChange={(e) => updateRpgAttribute(i, "value", parseInt(e.target.value) || 0)}
+                        className="w-16 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-center text-xs"
+                      />
+                      {rpgStats.discoMode && (
+                        <label
+                          className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--input)] px-1.5 py-1 cursor-pointer"
+                          title="Skill color — used to tint this skill's blockquote in the chat"
+                        >
+                          <input
+                            type="color"
+                            value={attr.color ?? pickPaletteColor(i)}
+                            onChange={(e) => updateRpgAttribute(i, "color", e.target.value)}
+                            className="h-4 w-4 cursor-pointer rounded border-none bg-transparent p-0"
+                          />
+                          <span className="text-[0.625rem] uppercase tracking-wide text-[var(--muted-foreground)]">
+                            color
+                          </span>
+                        </label>
+                      )}
+                      <button
+                        onClick={() => removeRpgAttribute(i)}
+                        className="ml-auto rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-red-500/15 hover:text-red-400"
+                      >
+                        <X size="0.75rem" />
+                      </button>
+                    </div>
+                    {rpgStats.discoMode && (
+                      <div className="flex flex-col gap-2 pt-1">
+                        <div className="flex flex-col gap-1">
+                          <label className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+                            Voice
+                          </label>
+                          <textarea
+                            value={attr.voice ?? ""}
+                            onChange={(e) => updateRpgAttribute(i, "voice", e.target.value)}
+                            rows={3}
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1.5 text-[0.6875rem] leading-relaxed resize-y"
+                            placeholder="How this skill sounds inside the mind — its tone, affect, and obsessions. E.g. a cold clinical observer that catalogues every detail without emotion..."
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <label className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+                            Description
+                          </label>
+                          <textarea
+                            value={attr.description ?? ""}
+                            onChange={(e) => updateRpgAttribute(i, "description", e.target.value)}
+                            rows={3}
+                            className="w-full rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1.5 text-[0.6875rem] leading-relaxed resize-y"
+                            placeholder="What situations, topics, or narrative events activate this skill. E.g. noticing physical details, reading body language, detecting lies or hidden threats..."
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

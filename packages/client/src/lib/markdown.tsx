@@ -209,6 +209,82 @@ function renderCodeBlock(lines: string[], lang: string, blockKey: string): React
   );
 }
 
+/** Matches the opening line of a skill-check tag: <skill-check name="…" tier="…" dc="…" rolled="…" result="…"> */
+const SKILL_CHECK_OPEN_RE = /^<skill-check\s+([^>]*)>\s*$/i;
+/** Matches the closing line of a skill-check tag. */
+const SKILL_CHECK_CLOSE_RE = /^<\/skill-check>\s*$/i;
+
+interface SkillCheckAttrs {
+  name: string;
+  tier: string;
+  dc: number;
+  rolled: number;
+  result: "success" | "failure";
+  color: string;
+}
+
+/** Parse attribute key="value" pairs from a skill-check opening tag's attribute string. */
+function parseSkillCheckAttrs(
+  attrStr: string,
+  fallbackColors?: Record<string, string>,
+): SkillCheckAttrs | null {
+  const get = (key: string) => new RegExp(`${key}="([^"]*)"`, "i").exec(attrStr)?.[1];
+  const name = get("name")?.trim();
+  const tier = get("tier")?.toLowerCase().trim();
+  const dc = parseInt(get("dc") ?? "", 10);
+  const rolled = parseInt(get("rolled") ?? "", 10);
+  const result = get("result")?.toLowerCase().trim();
+  if (!name || !tier || isNaN(dc) || isNaN(rolled) || (result !== "success" && result !== "failure")) return null;
+  // Color comes from the tag attribute (authoritative — set by server from persona config).
+  // Fall back to the client-side color map, then to a neutral default.
+  const tagColor = get("color")?.trim();
+  const color = tagColor || fallbackColors?.[slugifySkill(name)] || "rgba(255,255,255,0.6)";
+  return { name, tier, dc, rolled, result, color };
+}
+
+/** Slugify a skill name for data-attribute and color-map lookup. */
+function slugifySkill(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** Render a styled Disco Skills block from parsed tag attributes and body lines. */
+function renderDiscoBlock(
+  bodyLines: string[],
+  attrs: SkillCheckAttrs,
+  renderInline: (text: string, kp: string) => ReactNode[],
+  blockKey: string,
+): ReactNode {
+  const skillSlug = slugifySkill(attrs.name);
+  const tierLabel = attrs.tier.charAt(0).toUpperCase() + attrs.tier.slice(1);
+  const success = attrs.result === "success";
+  const voiceContent = bodyLines.join("\n").trim();
+
+  return (
+    <blockquote
+      key={blockKey}
+      className="mari-md-blockquote disco-skill"
+      data-disco-skill={skillSlug}
+      data-disco-tier={attrs.tier}
+      data-disco-result={attrs.result}
+      data-disco-rolled={attrs.rolled}
+      data-disco-dc={attrs.dc}
+      style={{ ["--disco-skill-color" as string]: attrs.color }}
+    >
+      <span className="disco-skill-header">
+        <span className="disco-skill-name">{attrs.name.toUpperCase()}</span>
+        <span className="disco-skill-meta">
+          {tierLabel} {attrs.dc} · {attrs.rolled} {success ? "✓" : "✗"}
+        </span>
+      </span>
+      {voiceContent && renderInline(voiceContent, `${blockKey}bq`)}
+    </blockquote>
+  );
+}
+
 function renderBlockquote(
   lines: string[],
   renderInline: (text: string, kp: string) => ReactNode[],
@@ -351,10 +427,20 @@ function renderTable(
  * Inline rendering is delegated to the provided `renderInline` callback,
  * which defaults to `applyInlineMarkdown`.
  */
+export interface RenderMarkdownOptions {
+  /**
+   * Slug → hex color map for the active persona's Disco Skills attributes.
+   * When present, blockquotes whose first line matches the disco header
+   * pattern are styled with the skill's color and tier-aware background.
+   */
+  discoSkillColors?: Record<string, string>;
+}
+
 export function renderMarkdownBlocks(
   text: string,
   renderInline: (text: string, keyPrefix: string) => ReactNode[] = applyInlineMarkdown,
   keyBase = "md",
+  options?: RenderMarkdownOptions,
 ): ReactNode {
   const lines = text.split("\n");
   const segments: ReactNode[] = [];
@@ -434,6 +520,30 @@ export function renderMarkdownBlocks(
         codeBuffer.push(line);
       }
       continue;
+    }
+
+    // ── Disco Skills: <skill-check> tag ──
+    // Structured tag emitted by the writer after calling resolve_skill_check.
+    // Color comes from the tag's own color= attribute (set by the server from
+    // persona config), so rendering works even without discoSkillColors.
+    {
+      const openMatch = SKILL_CHECK_OPEN_RE.exec(line);
+      if (openMatch) {
+        const attrs = parseSkillCheckAttrs(openMatch[1]!, options?.discoSkillColors);
+        if (attrs) {
+          flushAll();
+          const bodyLines: string[] = [];
+          let j = i + 1;
+          while (j < lines.length && !SKILL_CHECK_CLOSE_RE.test(lines[j]!)) {
+            bodyLines.push(lines[j]!);
+            j++;
+          }
+          if (SKILL_CHECK_CLOSE_RE.test(lines[j] ?? "")) j++; // consume closing tag
+          segments.push(renderDiscoBlock(bodyLines, attrs, renderInline, `${keyBase}disco${key++}`));
+          i = j - 1;
+          continue;
+        }
+      }
     }
 
     // ── Opening of fenced code block ──

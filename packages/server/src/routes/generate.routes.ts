@@ -442,6 +442,11 @@ export async function generateRoutes(app: FastifyInstance) {
         await chats.updateMessageExtra(userMsg.id, { attachments: input.attachments });
       }
 
+      // Persist pending skill check so regeneration replays the same directive
+      if (input.pendingSkillCheck && userMsg?.id) {
+        await chats.updateMessageExtra(userMsg.id, { pendingSkillCheck: input.pendingSkillCheck });
+      }
+
       // Snapshot persona info for per-message persona tracking
       if (userMsg?.id) {
         const snapshotPersonas = await chars.listPersonas();
@@ -2555,12 +2560,17 @@ export async function generateRoutes(app: FastifyInstance) {
                 typeof persona.personaStats === "string" ? JSON.parse(persona.personaStats) : persona.personaStats;
               if (pStats?.rpgStats?.enabled) {
                 const rpg = pStats.rpgStats as {
+                  discoMode?: boolean;
                   attributes: Array<{ name: string; value: number }>;
                   hp: { value: number; max: number };
                 };
+                // In Disco Skills mode, attribute *values* are hidden from the main
+                // model — exposing them biases tier selection. The values are still
+                // used server-side by resolve_skill_check.
+                const hideValues = rpg.discoMode === true;
                 const rpgLines = [`Max HP: ${rpg.hp.max}`];
                 for (const attr of rpg.attributes) {
-                  rpgLines.push(`${attr.name}: ${attr.value}`);
+                  rpgLines.push(hideValues ? attr.name : `${attr.name}: ${attr.value}`);
                 }
                 fieldParts.push(wrapContent(rpgLines.join("\n"), "rpg_attributes", wrapFormat, 2));
               }
@@ -3461,8 +3471,8 @@ export async function generateRoutes(app: FastifyInstance) {
         }
       }
 
-      // If the CYOA agent is enabled, inject previous choices for anti-repetition
-      if (resolvedAgents.some((a) => a.type === "cyoa")) {
+      // If the CYOA or CYOA Skill Checks agent is enabled, inject previous choices for anti-repetition
+      if (resolvedAgents.some((a) => a.type === "cyoa" || a.type === "cyoa-skills")) {
         const lastAssistantMsg = chatMessages.filter((m: any) => m.role === "assistant").at(-1);
         if (lastAssistantMsg) {
           const lastExtra = parseExtra((lastAssistantMsg as any).extra);
@@ -3798,10 +3808,27 @@ export async function generateRoutes(app: FastifyInstance) {
         });
       };
 
-      // Create the pipeline (exclude editor — it runs last, after all other agents)
+      // Create the pipeline (exclude editor — it runs last, after all other agents).
+      // Disco Skills is also excluded: it's a deterministic context-injection agent
+      // that doesn't make an LLM call — its injection is built directly below.
       const editorAgent = resolvedAgents.find((a) => a.type === "editor");
       const lorebookKeeperAgent = resolvedAgents.find((a) => a.type === "lorebook-keeper") ?? null;
-      let pipelineAgents = resolvedAgents.filter((a) => a.type !== "editor" && a.type !== "lorebook-keeper");
+      const discoSkillsAgent = resolvedAgents.find((a) => a.type === "disco-skills");
+      const cyoaSkillsAgent = resolvedAgents.find((a) => a.type === "cyoa-skills");
+
+      // Mutual exclusion: if both cyoa and cyoa-skills are enabled, prefer cyoa-skills
+      const hasCyoa = resolvedAgents.some((a) => a.type === "cyoa");
+      if (hasCyoa && cyoaSkillsAgent) {
+        logger.warn("[agents] Both cyoa and cyoa-skills are enabled — running cyoa-skills only");
+      }
+
+      let pipelineAgents = resolvedAgents.filter(
+        (a) =>
+          a.type !== "editor" &&
+          a.type !== "lorebook-keeper" &&
+          a.type !== "disco-skills" &&
+          (hasCyoa && cyoaSkillsAgent ? a.type !== "cyoa" : true),
+      );
 
       // When manualTrackers is enabled, strip tracker-category agents from the
       // automatic pipeline — the user will trigger them manually via retry-agents.
@@ -3821,6 +3848,55 @@ export async function generateRoutes(app: FastifyInstance) {
       if (chatMeta.encounterActive === false) {
         pipelineAgents = pipelineAgents.filter((a) => a.type !== "combat");
       }
+
+      // ────────────────────────────────────────
+      // Disco Skills Resolution
+      // ────────────────────────────────────────
+      // If the disco-skills agent is enabled AND the active persona is in disco
+      // mode, the writer is allowed to call resolve_skill_check inline. Build
+      // the skill-level lookup here (used server-side by the tool to gate checks
+      // and roll dice) — these levels are NEVER exposed to the writer.
+      let discoSkillLevels: Record<string, number> | undefined;
+      let discoSkillVoices:
+        | Array<{ name: string; voice: string; domain: string; color: string }>
+        | undefined;
+      if (discoSkillsAgent && persona?.personaStats) {
+        try {
+          const pStats =
+            typeof persona.personaStats === "string"
+              ? JSON.parse(persona.personaStats)
+              : persona.personaStats;
+          if (pStats?.rpgStats?.enabled && pStats.rpgStats.discoMode) {
+            const attrs = pStats.rpgStats.attributes as Array<{
+              name: string;
+              value: number;
+              voice?: string;
+              description?: string;
+              color?: string;
+            }>;
+            // Fallback palette mirrors the client-side DEFAULT_DISCO_PALETTE so
+            // skills without a saved color still get a distinct tint.
+            const fallbackPalette = [
+              "#f97316","#3b82f6","#22c55e","#a855f7","#ef4444",
+              "#06b6d4","#eab308","#ec4899","#14b8a6","#f59e0b",
+            ];
+            if (Array.isArray(attrs) && attrs.length > 0) {
+              discoSkillLevels = Object.fromEntries(
+                attrs.map((a) => [a.name.toLowerCase(), a.value]),
+              );
+              discoSkillVoices = attrs.map((a, idx) => ({
+                name: a.name,
+                voice: a.voice ?? "",
+                domain: a.description ?? "",
+                color: a.color ?? fallbackPalette[idx % fallbackPalette.length]!,
+              }));
+            }
+          }
+        } catch {
+          // malformed personaStats JSON — disco stays off for this turn
+        }
+      }
+      const discoSkillsActive = discoSkillLevels !== undefined;
 
       // ────────────────────────────────────────
       // Tool Resolution (Main Generation + Agent Pipeline)
@@ -3865,6 +3941,24 @@ export async function generateRoutes(app: FastifyInstance) {
               parameters: t.parameters as unknown as Record<string, unknown>,
             },
           });
+        }
+
+        // When disco-skills is active, force-include resolve_skill_check even if
+        // the chat's activeToolIds filter would exclude it — the user opted in
+        // by enabling the disco-skills agent and putting the persona in disco mode.
+        if (discoSkillsActive && !registeredToolSources.has("resolve_skill_check")) {
+          const t = BUILT_IN_TOOLS.find((b) => b.name === "resolve_skill_check");
+          if (t) {
+            registeredToolSources.set(t.name, "built-in");
+            toolDefs.push({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters as unknown as Record<string, unknown>,
+              },
+            });
+          }
         }
 
         // Custom tools from DB
@@ -4070,10 +4164,47 @@ export async function generateRoutes(app: FastifyInstance) {
               customTools: customToolDefs,
               spotify: spotifyCreds,
               searchLorebook: searchLorebookForTools,
+              skillLevels: discoSkillLevels,
             });
             return results[0]?.result ?? "Tool execution failed";
           },
         };
+      }
+
+      // ── CYOA Skills agent: inject {{SKILLS}} into promptTemplate + build tool context ──
+      if (cyoaSkillsAgent && discoSkillsActive && discoSkillVoices) {
+        const { getDefaultAgentPrompt: getPromptForCyoaSkills } = await import("@marinara-engine/shared");
+        const cyoaSkillsTemplate = (
+          cyoaSkillsAgent.promptTemplate || getPromptForCyoaSkills("cyoa-skills") || ""
+        ).trim();
+        const skillLines = discoSkillVoices.map(
+          (s) =>
+            `- ${s.name} [color: ${s.color}]${s.voice ? ` — voice: "${s.voice}"` : ""}${s.domain ? ` — domain: "${s.domain}"` : ""}`,
+        );
+        cyoaSkillsAgent.promptTemplate = cyoaSkillsTemplate.replace(/\{\{SKILLS\}\}/g, skillLines.join("\n"));
+
+        // Build tool context: preview_skill_check requires skillLevels
+        const previewTool = BUILT_IN_TOOLS.find((t) => t.name === "preview_skill_check");
+        if (previewTool) {
+          const cyoaTool = {
+            type: "function" as const,
+            function: {
+              name: previewTool.name,
+              description: previewTool.description,
+              parameters: previewTool.parameters as unknown as Record<string, unknown>,
+            },
+          };
+          cyoaSkillsAgent.toolContext = {
+            tools: [cyoaTool],
+            executeToolCall: async (call) => {
+              if (call.function.name !== "preview_skill_check") {
+                return JSON.stringify({ error: `Tool not allowed for cyoa-skills: ${call.function.name}` });
+              }
+              const results = await executeToolCalls([call], { skillLevels: discoSkillLevels });
+              return results[0]?.result ?? "Tool execution failed";
+            },
+          };
+        }
       }
 
       const pipeline = createAgentPipeline(pipelineAgents, agentContext, sendAgentEvent);
@@ -4650,6 +4781,80 @@ export async function generateRoutes(app: FastifyInstance) {
         }
       }
 
+      // ────────────────────────────────────────
+      // Static injection: Disco Skills agent
+      // ────────────────────────────────────────
+      // Built deterministically from the active persona's skill list (names +
+      // voices + domains) and the agent's promptTemplate. No LLM call. Skill
+      // *levels* are intentionally NOT included — exposing them would bias the
+      // writer's tier selection. The server-side resolve_skill_check tool gates
+      // checks against levels.
+      if (discoSkillsActive && discoSkillsAgent && discoSkillVoices) {
+        const skillLines = discoSkillVoices.map(
+          (s) =>
+            `- ${s.name} [color: ${s.color}]${s.voice ? ` — voice: "${s.voice}"` : ""}${s.domain ? ` — domain: "${s.domain}"` : ""}`,
+        );
+        const { getDefaultAgentPrompt: getPromptForDisco } = await import("@marinara-engine/shared");
+        const discoTemplate = (
+          discoSkillsAgent.promptTemplate || getPromptForDisco("disco-skills") || ""
+        ).trim();
+
+        // Resolve pending active skill check — from current request (fresh gen) or
+        // from the last user message extra (regen replays the committed check).
+        let activeSkillCheck = input.pendingSkillCheck ?? null;
+        if (!activeSkillCheck && input.regenerateMessageId) {
+          const lastUserMsg = chatMessages.filter((m: any) => m.role === "user").at(-1);
+          if (lastUserMsg) {
+            const lastUserExtra = parseExtra((lastUserMsg as any).extra);
+            if (lastUserExtra.pendingSkillCheck) {
+              activeSkillCheck = lastUserExtra.pendingSkillCheck as { skill: string; tier: string };
+            }
+          }
+        }
+        const activeSkillDirective = activeSkillCheck
+          ? `<active_skill_check>
+ACTIVE CHECK COMMITTED: The user has committed to a **${activeSkillCheck.skill}** check at **${activeSkillCheck.tier}** difficulty.
+Your response MUST open with a resolve_skill_check("${activeSkillCheck.skill}", "${activeSkillCheck.tier}") tool call.
+Render the <skill-check> voice block FIRST (before any other narrative), then narrate the outcome of the check.
+This supersedes the 1–3 passive checks budget — prioritise this active check above all else.
+</active_skill_check>
+
+`
+          : "";
+
+        const discoText = discoTemplate
+          .replace(/\{\{SKILLS\}\}/g, skillLines.join("\n"))
+          .replace(/\{\{ACTIVE_SKILL_DIRECTIVE\}\}/g, activeSkillDirective);
+        if (discoText) {
+          const wrapped = formatAgentInjections(
+            [{ agentType: "disco-skills", text: discoText }],
+            wrapFormat,
+          );
+          finalMessages = injectAtDepth(finalMessages, [
+            { content: wrapped, role: "system", depth: 0 },
+          ]);
+
+          reply.raw.write(
+            `data: ${JSON.stringify({
+              type: "agent_result",
+              data: {
+                agentId: discoSkillsAgent.id,
+                agentType: "disco-skills",
+                agentName: discoSkillsAgent.name || "Disco Skills",
+                resultType: "context_injection",
+                data: {
+                  text: discoText,
+                  skillCount: discoSkillVoices.length,
+                },
+                success: true,
+                error: null,
+                durationMs: 0,
+              },
+            })}\n\n`,
+          );
+        }
+      }
+
       // Notify UI if a chat summary was injected into the prompt (works with or without the agent)
       if (chatMeta.summary) {
         const chatSummaryCfg = enabledConfigs.find((c: any) => c.type === "chat-summary");
@@ -5009,6 +5214,7 @@ export async function generateRoutes(app: FastifyInstance) {
                 customTools: customToolDefs,
                 spotify: spotifyCreds,
                 searchLorebook: searchLorebookForTools,
+                skillLevels: discoSkillLevels,
               });
               const toolResultsById = new Map(
                 [...executedToolResults, ...deniedToolResults].map((result) => [result.toolCallId, result]),
@@ -6679,17 +6885,17 @@ export async function generateRoutes(app: FastifyInstance) {
           }
         }
 
+        // Collect all successful post-processing agent outputs for the editor's context.
+        const agentSummary: Record<string, unknown> = {};
+        for (const result of postResults) {
+          if (result.success && result.data) {
+            agentSummary[result.agentType ?? result.type] = result.data;
+          }
+        }
+
         // ── Consistency Editor: runs after ALL other agents ──
         if (editorAgent && messageId && !abortController.signal.aborted) {
           try {
-            // Collect all successful agent outputs as a summary for the editor
-            const agentSummary: Record<string, unknown> = {};
-            for (const result of postResults) {
-              if (result.success && result.data) {
-                agentSummary[result.agentType ?? result.type] = result.data;
-              }
-            }
-
             // Build editor context with agent results injected into memory
             const editorContext: AgentContext = {
               ...agentContext,
@@ -6733,6 +6939,7 @@ export async function generateRoutes(app: FastifyInstance) {
             // Non-critical — don't fail generation if editor errors
           }
         }
+
       }
 
       // ────────────────────────────────────────

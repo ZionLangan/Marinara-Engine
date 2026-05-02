@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep *)",
+      "Bash(find . *)",
+      "Bash(pnpm check *)",
+      "Read(//c/Users/zionl/AppData/Roaming/**)",
+      "Read(//c/Users/zionl/AppData/Local/**)",
+      "Bash(node dist/index.js)",
+      "Bash(kill %1)",
+      "Bash(ls /c/Users/zionl/OneDrive/Documents/GitHub/Marinara-Engine/*.bat)",
+      "Bash(grep -n \"background\\\\|purple\\\\|violet\\\\|#[0-9a-f]\\\\{3,6\\\\}\" /c/Users/zionl/OneDrive/Documents/GitHub/Marinara-Engine/packages/client/src/styles/globals.css)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}

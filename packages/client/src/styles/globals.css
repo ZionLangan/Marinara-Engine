@@ -535,6 +535,81 @@ strong {
   font-style: italic;
 }
 
+/* ── Disco Skills blockquote ───────────────────────────────────────────────
+ * Skill-check thoughts emitted by the writer when Disco Skills is active.
+ * The renderer parses the bracket header and sets:
+ *   --disco-skill-color  → per-skill hex color (from persona config)
+ *   data-disco-tier      → tier name (lowercase) for tint scaling
+ *   data-disco-result    → "success" | "failure"
+ *   data-disco-rolled / data-disco-dc → numeric metadata (unused by CSS today)
+ */
+.mari-message-content .mari-md-blockquote.disco-skill {
+  --disco-skill-color: rgba(255, 255, 255, 0.6);
+  --disco-tier-pct: 6%;
+  border-left: 3px solid var(--disco-skill-color);
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--disco-skill-color) var(--disco-tier-pct), transparent) 0%,
+      transparent 80%
+    );
+  padding: 0.45em 0.6em 0.45em 0.85em;
+  margin: 0.6em 0;
+  border-radius: 0 6px 6px 0;
+  color: color-mix(in oklab, var(--disco-skill-color) 65%, white 35%);
+}
+
+/* Tier-aware background tint scaling. Higher tiers feel weightier on the page. */
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="trivial"]     { --disco-tier-pct: 5%;  }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="easy"]        { --disco-tier-pct: 8%;  }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="medium"]      { --disco-tier-pct: 12%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="challenging"] { --disco-tier-pct: 16%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="formidable"]  { --disco-tier-pct: 20%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="legendary"]   { --disco-tier-pct: 24%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="heroic"]      { --disco-tier-pct: 28%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="godly"]       { --disco-tier-pct: 32%; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="impossible"]  { --disco-tier-pct: 38%; }
+
+/* Border thickens with tier difficulty too — adds visual weight to harder rolls. */
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="formidable"],
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="legendary"]  { border-left-width: 4px; }
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="heroic"],
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="godly"],
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-tier="impossible"] { border-left-width: 5px; }
+
+/* Failure state — desaturated tint, dashed left rule. */
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-result="failure"] {
+  border-left-style: dashed;
+  filter: saturate(0.55);
+  opacity: 0.92;
+}
+
+/* Success state — subtle inner glow on the left edge. */
+.mari-message-content .mari-md-blockquote.disco-skill[data-disco-result="success"] {
+  box-shadow: inset 2px 0 0 0 color-mix(in oklab, var(--disco-skill-color) 60%, white 40%);
+}
+
+/* Structured header row rendered above the voice text. */
+.mari-message-content .mari-md-blockquote.disco-skill .disco-skill-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5em;
+  margin-bottom: 0.35em;
+  font-style: normal;
+  opacity: 0.75;
+}
+.mari-message-content .mari-md-blockquote.disco-skill .disco-skill-name {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.mari-message-content .mari-md-blockquote.disco-skill .disco-skill-meta {
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
 /* Unordered lists */
 .mari-message-content .mari-md-ul {
   list-style: disc;

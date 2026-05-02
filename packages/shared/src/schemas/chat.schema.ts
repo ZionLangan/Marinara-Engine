@@ -46,6 +46,14 @@ export const generateRequestSchema = z.object({
     )
     .optional()
     .default([]),
+  pendingSkillCheck: z
+    .object({
+      skill: z.string(),
+      tier: z.string(),
+    })
+    .nullable()
+    .optional()
+    .default(null),
 });
 
 // Auto-summarization entries — shape-only validation (no length caps).

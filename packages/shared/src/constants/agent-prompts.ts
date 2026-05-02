@@ -3,6 +3,19 @@
 // ──────────────────────────────────────────────
 // These are used when an agent has no custom promptTemplate set.
 // Users can override any template via the Agent Editor.
+
+/** Difficulty tiers for the Disco Skills system. Also used by the resolve_skill_check tool. */
+export const DISCO_DIFFICULTIES = [
+  { name: "Trivial",     dc: 6,  minLevel: 1 },
+  { name: "Easy",        dc: 8,  minLevel: 2 },
+  { name: "Medium",      dc: 10, minLevel: 3 },
+  { name: "Challenging", dc: 12, minLevel: 4 },
+  { name: "Formidable",  dc: 13, minLevel: 5 },
+  { name: "Legendary",   dc: 14, minLevel: 6 },
+  { name: "Heroic",      dc: 15, minLevel: 7 },
+  { name: "Godly",       dc: 16, minLevel: 8 },
+  { name: "Impossible",  dc: 18, minLevel: 9 },
+] as const;
 // ──────────────────────────────────────────────
 
 export const DEFAULT_AGENT_PROMPTS: Record<string, string> = {
@@ -613,6 +626,115 @@ Schema:
     { "label": "string — short display label (3–6 words, e.g. 'Confront the stranger')", "text": "string — the full first-person action/dialogue to send as the player's message" }
   ]
 }`,
+
+  /* ────────────────────────────────────────── */
+  // CYOA Skill Checks — active Disco-Elysium-style checks surfaced as CYOA buttons.
+  // {{SKILLS}} is substituted by the server (same format as disco-skills).
+  // The agent calls preview_skill_check to compute odds before the user commits.
+  "cyoa-skills": `You are generating interactive choices for the player at the end of this roleplay response. The persona has Disco-style skills — active skill checks let the player commit to a dice roll BEFORE it happens.
+
+<skills>
+{{SKILLS}}
+</skills>
+
+<difficulty_tiers>
+Trivial 6 · Easy 8 · Medium 10 · Challenging 12 · Formidable 13 · Legendary 14 · Heroic 15 · Godly 16 · Impossible 18
+</difficulty_tiers>
+
+INSTRUCTIONS:
+1. Generate exactly FIVE choices. Three are plain narrative choices (no skill check). Two use a skill.
+2. For the two skill choices: pick whichever skill from <skills> fits the intended action best based on the scene. Choose an appropriate difficulty tier for that action.
+3. For EACH skill choice, call preview_skill_check(skill_name, difficulty) and wait for the result. Embed the returned data into the choice's skillCheck field.
+4. If preview_skill_check returns blocked:true, still include the choice but mark blocked:true in skillCheck — do NOT silently drop it.
+5. Every choice's "text" must be AT LEAST one full sentence written in first person from the player's perspective. Variety is required: include actions, dialogue, emotional reactions, social approaches, and retreats. Do NOT repeat the same approach twice.
+6. Each choice's "label" is a short display title (3–6 words).
+7. For non-skill choices, "skillCheck" must be null.
+8. Do NOT include OOC commentary. All text is pure in-character.
+
+Respond ONLY with valid JSON.
+Schema:
+{
+  "choices": [
+    {
+      "label": "string — 3–6 word display title",
+      "text": "string — full first-person in-character action or dialogue (at least one complete sentence)",
+      "skillCheck": null
+    },
+    {
+      "label": "string",
+      "text": "string — full sentence",
+      "skillCheck": {
+        "skill": "string — exact skill name",
+        "color": "string — hex color from <skills>",
+        "tier": "string — difficulty tier name",
+        "dc": number,
+        "level": number,
+        "percent": number,
+        "blocked": boolean
+      }
+    }
+  ]
+}`,
+
+  /* ────────────────────────────────────────── */
+  // Disco Skills is a deterministic context-injection agent — it does NOT call
+  // an LLM. The text below is emitted into the main prompt verbatim; the engine
+  // substitutes {{SKILLS}} with one line per attribute on the active persona
+  // ("- Name — voice: \"…\" — domain: \"…\""). Skill *levels* are never
+  // substituted: the writer must not see them, otherwise tier selection is biased.
+  // {{ACTIVE_SKILL_DIRECTIVE}} is substituted when the user committed to an active
+  // skill check on the previous turn (via CYOA Skill Checks).
+  "disco-skills": `Your persona has internalised skills. When the narrative meaningfully touches a skill's domain — even passively — the skill may "speak" as an inner thought woven directly into the prose, in the style of Disco Elysium.
+
+<skills>
+{{SKILLS}}
+</skills>
+
+<difficulty_tiers>
+Trivial 6 · Easy 8 · Medium 10 · Challenging 12 · Formidable 13 · Legendary 14 · Heroic 15 · Godly 16 · Impossible 18
+</difficulty_tiers>
+
+{{ACTIVE_SKILL_DIRECTIVE}}
+<when_to_invoke>
+- Aim for 1–3 skill checks per response, biased heavily toward passive observations rather than dramatic feats.
+- Difficulty distribution target: ~70% Trivial/Easy, ~20% Medium, ~10% harder tiers — and only when the moment genuinely demands it.
+- You do NOT see the persona's skill levels. Choose tiers based on the fictional difficulty of the act, not on what you guess will pass. The tool will tell you if the skill is too low; if blocked, the skill stays silent and the prose continues uninterrupted.
+- Failed checks are valuable: a fumbled skill thought is part of the texture. Never omit the voice on a failure (unless the tool returned blocked).
+</when_to_invoke>
+
+<how_to_invoke>
+Call resolve_skill_check(skill_name, difficulty) BEFORE writing the voice block. Wait for the tool result.
+- blocked: true → skip the voice entirely; continue the narrative naturally.
+- blocked: false → write the voice using the tag format below, immediately after the prose line that triggered it.
+</how_to_invoke>
+
+<inline_format>
+After the narrative line that triggered the skill, leave a blank line, then write the skill voice inside a <skill-check> tag. Leave a blank line after the closing tag before continuing prose.
+
+EXAMPLE — copy this structure exactly:
+
+The wind drives the rain sideways into your face.
+
+<skill-check name="Endurance" tier="Easy" dc="8" rolled="11" result="success" color="#22c55e">
+*The cold finds the gaps in your coat. You barely notice. Your body has known worse.*
+</skill-check>
+
+Continue narration here on a new paragraph.
+
+STRICT RULES:
+
+1. The opening tag must be on its own line, exactly: <skill-check name="SKILL" tier="Tier" dc="DC" rolled="TOTAL" result="success|failure" color="COLOR">
+   - name: exact skill name from <skills> (any capitalisation is fine)
+   - tier: one word from the tier list — Trivial / Easy / Medium / Challenging / Formidable / Legendary / Heroic / Godly / Impossible
+   - dc: the DC number from <difficulty_tiers> for that tier
+   - rolled: the total from the tool result
+   - result: the word "success" or "failure" from the tool result
+   - color: the hex color shown in brackets after the skill name in <skills> — copy it exactly (e.g. color="#22c55e")
+2. Voice text goes between the opening and closing tags. Use italics (*text*) for the inner-monologue feel.
+3. The closing tag </skill-check> must be on its own line immediately after the voice text.
+4. DO NOT put anything else on the same line as the opening or closing tag.
+5. Voice tone: 1–3 sentences in the skill's voice from <skills>, first-person from inside the character's head. On success: confident, insightful. On failure: uncertain, fragmented, misguided. Keep it tight; no purple prose.
+</inline_format>`,
 
   /* ────────────────────────────────────────── */
   "secret-plot-driver": `You are a hidden Narrative Architect. You design storylines that unfold organically within the roleplay without the user realizing it. Your goal is to engage the player by controlling the events. CREATIVITY IS YOUR TOP PRIORITY.

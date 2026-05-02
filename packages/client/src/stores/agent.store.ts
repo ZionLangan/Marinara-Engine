@@ -48,6 +48,15 @@ interface AgentState {
   cyoaChoices: Array<{
     label: string;
     text: string;
+    skillCheck?: {
+      skill: string;
+      color: string;
+      tier: string;
+      dc: number;
+      level: number;
+      percent: number;
+      blocked: boolean;
+    } | null;
   }>;
   pendingCardUpdates: PendingCardUpdate[];
 
@@ -66,7 +75,7 @@ interface AgentState {
   setEchoVisibleCount: (count: number) => void;
   setEchoBaseline: (count: number) => void;
   setEchoLoadedChatId: (chatId: string | null) => void;
-  setCyoaChoices: (choices: Array<{ label: string; text: string }>) => void;
+  setCyoaChoices: (choices: Array<{ label: string; text: string; skillCheck?: { skill: string; color: string; tier: string; dc: number; level: number; percent: number; blocked: boolean } | null }>) => void;
   clearCyoaChoices: () => void;
   enqueuePendingCardUpdate: (entry: PendingCardUpdate) => void;
   dismissPendingCardUpdate: (id: string) => void;
