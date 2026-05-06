@@ -10,7 +10,14 @@
       "Bash(kill %1)",
       "Bash(ls /c/Users/zionl/OneDrive/Documents/GitHub/Marinara-Engine/*.bat)",
       "Bash(grep -n \"background\\\\|purple\\\\|violet\\\\|#[0-9a-f]\\\\{3,6\\\\}\" /c/Users/zionl/OneDrive/Documents/GitHub/Marinara-Engine/packages/client/src/styles/globals.css)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(git check-ignore *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm --filter @marinara-engine/server lint)",
+      "Bash(pnpm --filter @marinara-engine/server tsc --noEmit)",
+      "Bash(git stash *)",
+      "Bash(sed -n '180,230p')",
+      "Bash(npx tsx *)"
     ]
   }
 }

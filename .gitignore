@@ -40,6 +40,9 @@ packages/server/data/
 # Custom agents (personal)
 .github/agents/qa.agent.md
 
+# Local planning notes
+PLAN-*.md
+
 # Build output
 release/
 release-artifacts/

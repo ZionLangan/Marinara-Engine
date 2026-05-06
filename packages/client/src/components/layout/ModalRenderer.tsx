@@ -23,6 +23,9 @@ const ImportLorebookModal = lazy(() =>
 const LorebookMakerModal = lazy(() =>
   import("../modals/LorebookMakerModal").then((module) => ({ default: module.LorebookMakerModal })),
 );
+const WikiLorebookModal = lazy(() =>
+  import("../modals/WikiLorebookModal").then((module) => ({ default: module.WikiLorebookModal })),
+);
 const CreatePresetModal = lazy(() =>
   import("../modals/CreatePresetModal").then((module) => ({ default: module.CreatePresetModal })),
 );
@@ -77,6 +80,9 @@ export function ModalRenderer() {
       break;
     case "lorebook-maker":
       content = <LorebookMakerModal open onClose={closeModal} />;
+      break;
+    case "wiki-lorebook":
+      content = <WikiLorebookModal open onClose={closeModal} />;
       break;
     case "create-preset":
       content = <CreatePresetModal open onClose={closeModal} />;

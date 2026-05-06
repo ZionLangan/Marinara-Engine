@@ -1,0 +1,57 @@
+[
+  {
+    "title": "The_Calixis_Sector",
+    "display_title": "The Calixis Sector",
+    "url": "https://calixipedia.fandom.com/wiki/The_Calixis_Sector",
+    "depth": 0,
+    "categories": ["Calixis Sector", "Locations"],
+    "rewritten": "[The Calixis Sector — Sector]\nLocation: Segmentum Obscurus, northern galactic edge.\nFounded: Conquered by Lord Militant Golgenna Angevin ~1000 years ago.\nFirst governor: Drusus (later Imperial saint).\nCapital: Scintilla, in the Golgenna Reach.\nNeighbours: Ixaniad Sector (coreward), Halo Stars (rimward, contested).\nThreat: Hereticus Tenebrae aka the Tyrant Star — prophesied doom Inquisition seeks to destroy.\nGovernment: Sector Governor Marius Hax officially rules from Lucid Palace, Scintilla. Calixian Conclave (Lord Inquisitor Caidin) is true power.",
+    "llm_keys": ["The Calixis Sector", "Calixis Sector", "Calixis"],
+    "tier": "core",
+    "container": null
+  },
+  {
+    "title": "Sector_Governor_Marius_Hax",
+    "display_title": "Sector Governor Marius Hax",
+    "url": "https://calixipedia.fandom.com/wiki/Sector_Governor_Marius_Hax",
+    "depth": 1,
+    "categories": ["Calixis Sector", "Imperium of Man", "Nobility"],
+    "rewritten": "[Marius Hax — NPC]\nRole: Sector Governor of Calixis. Formal title: Lord Sector / Lord Calixis.\nOrigin: Ancient Terran noble bloodline (Segmentum Solar).\nAppointed: ~150 years ago by High Lords of Terra.\nAge: ~200 Scintillan years; juvenat-treated, appears ~50.\nSeat: Lucid Palace, Scintilla.\nPersonality: Solemn, intimidating, obsessive about minutiae of governance. Rare public appearances.",
+    "llm_keys": ["Marius Hax", "Sector Governor Marius Hax", "Lord Hax", "Lord Sector", "Lord Calixis"],
+    "tier": "regional",
+    "container": "Scintilla"
+  },
+  {
+    "title": "The_Lathes",
+    "display_title": "The Lathes",
+    "url": "https://calixipedia.fandom.com/wiki/The_Lathes",
+    "depth": 1,
+    "categories": ["Calixis Sector", "Forge Worlds"],
+    "rewritten": "[The Lathes — Forge World System]\nThree planetoids in anarchic orbit around a blue-white sun: Lathe-Het, Lathe-Hesh, Lathe-Hadd.\nForemost forge worlds of the Calixis Sector; rival Scintilla's Gunmetal City for arms output.\nFamous for: Lathe-blade swords, unbreakable. Hyper-gravity events from intersecting orbits.\nControl: Adeptus Mechanicus (Lathe-Covenant). Arch-Magos rules; Mechanicum has converted nearly every object in-system.",
+    "llm_keys": ["The Lathes", "Lathes", "Lathe-Het", "Lathe-Hesh", "Lathe-Hadd"],
+    "tier": "regional",
+    "container": "The Lathes"
+  },
+  {
+    "title": "The_Periphery",
+    "display_title": "The Periphery",
+    "url": "https://calixipedia.fandom.com/wiki/The_Periphery",
+    "depth": 1,
+    "categories": ["Calixis Sector", "Sub-sectors"],
+    "rewritten": "[The Periphery — Sub-sector]\nMost remote sub-sector of Calixis. Only one not bordering Golgenna Reach (lies spinward).\nNeighbours: Malfian Sub-sector, Markayn Marches.\nCharacter: Frontier worlds, marginalized populations, isolated planets.\nClerical authority: Cardinal Fortis, Arch-Diocese of Periphery and Halo Stars; rules from starship Pax Calixis.",
+    "llm_keys": ["The Periphery", "Periphery"],
+    "tier": "regional",
+    "container": "The Periphery"
+  },
+  {
+    "title": "Random_Pilgrim",
+    "display_title": "Wandering Pilgrim of the Drusian Creed",
+    "url": "https://calixipedia.fandom.com/wiki/Random_Pilgrim",
+    "depth": 3,
+    "categories": ["Calixis Sector", "Imperial Cult"],
+    "rewritten": "[Drusian Pilgrim — Atmosphere]\nWandering pilgrims of Saint Drusus' Creed travel the Calixis Sector.\nWear ash-grey robes, carry a small icon of Drusus' lance.\nOften beg passage on Imperial vessels; some claim minor miracles.\nUseful as flavour NPCs in any pious or shrine-world scene.",
+    "llm_keys": ["Drusian Pilgrim", "Wandering Pilgrim", "Drusian Creed"],
+    "tier": "deep",
+    "container": null
+  }
+]

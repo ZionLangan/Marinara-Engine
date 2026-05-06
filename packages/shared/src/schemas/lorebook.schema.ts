@@ -32,7 +32,7 @@ export const createLorebookSchema = z.object({
   chatId: z.string().nullable().default(null),
   enabled: z.boolean().default(true),
   tags: z.array(z.string()).default([]),
-  generatedBy: z.enum(["user", "agent", "import", "lorebook-maker"]).nullable().default(null),
+  generatedBy: z.enum(["user", "agent", "import", "lorebook-maker", "wiki-import"]).nullable().default(null),
   sourceAgentId: z.string().nullable().default(null),
 });
 
@@ -49,7 +49,7 @@ export const updateLorebookSchema = z.object({
   chatId: z.string().nullable().optional(),
   enabled: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
-  generatedBy: z.enum(["user", "agent", "import", "lorebook-maker"]).nullable().optional(),
+  generatedBy: z.enum(["user", "agent", "import", "lorebook-maker", "wiki-import"]).nullable().optional(),
   sourceAgentId: z.string().nullable().optional(),
 });
 

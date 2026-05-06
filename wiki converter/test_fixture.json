@@ -1,0 +1,78 @@
+[
+  {
+    "title": "The_Calixis_Sector",
+    "display_title": "The Calixis Sector",
+    "url": "https://calixipedia.fandom.com/wiki/The_Calixis_Sector",
+    "summary": "The Calixis Sector is located in the Segmentum Obscurus, on the northern edge of the known galaxy, and represents a portion of the considerable territories conquered by the Imperial hero Lord Militant Golgenna Angevin more than a thousand years ago. Its first governor was Drusus, one of Angevin's most capable generals, a man now revered as an Imperial saint. The hive world of Scintilla, situated in the Golgenna Reach, is the capital of the Calixis Sector. Bordering to coreward, its immediate neighbour is the Ixaniad Sector. To rimward lie the contested and unregulated frontiers of the Halo Stars.",
+    "sections": [
+      {
+        "heading": "_lead",
+        "text": "The Calixis Sector is located in the Segmentum Obscurus, on the northern edge of the known galaxy, and represents a portion of the considerable territories conquered by the Imperial hero Lord Militant Golgenna Angevin more than a thousand years ago. Its first governor was Drusus, one of Angevin's most capable generals, a man now revered as an Imperial saint. The hive world of Scintilla, situated in the Golgenna Reach, is the capital of the Calixis Sector. Bordering to coreward, its immediate neighbour is the Ixaniad Sector."
+      },
+      {
+        "heading": "Threats",
+        "text": "A singular threat lurks somewhere in the Calixis Sector, a mysterious, prophesied doom known as the Hereticus Tenebrae, or the Tyrant Star. The Inquisition most fervently wishes to uncover, comprehend and destroy it before it is too late."
+      },
+      {
+        "heading": "Government",
+        "text": "The most powerful man in the Calixis Sector is officially Sector Governor Marius Hax, who rules in the name of the Adeptus Terra from the Lucid Palace on Scintilla. However, the Calixian Conclave, led by Lord Inquisitor Caidin, is the ultimate authority in the sector."
+      }
+    ],
+    "links": ["Scintilla", "Sepheris_Secundus", "Iocanthos", "The_Lathes", "Sector_Governor_Marius_Hax", "Calixian_Conclave"],
+    "categories": ["Calixis Sector", "Locations"],
+    "depth": 0
+  },
+  {
+    "title": "Sector_Governor_Marius_Hax",
+    "display_title": "Sector Governor Marius Hax",
+    "url": "https://calixipedia.fandom.com/wiki/Sector_Governor_Marius_Hax",
+    "summary": "Lord Hax (whose formally correct title is Lord Sector or Lord Calixis) is descended from an ancient family of Terran stock, a bloodline bred for leadership in the Imperial heartland of the Segmentum Solar.",
+    "sections": [
+      {
+        "heading": "_lead",
+        "text": "Lord Hax (whose formally correct title is Lord Sector or Lord Calixis) is descended from an ancient family of Terran stock, a bloodline bred for leadership in the Imperial heartland of the Segmentum Solar. He was appointed governor of the sector by the High Lords of the Adeptus Terra more than one hundred and fifty years ago, and maintains a firm, unflinching grip on the planets under his control. The Lord Sector is a man of immense gravitas and solemnity, a glowering, intimidating presence at the heart of the Lucid Palace on Scintilla."
+      },
+      {
+        "heading": "Personality",
+        "text": "Hax makes few public appearances, and personal audiences are rare. His devotion to the minutiae of leadership is legendary. He is over two hundred Scintillan years old, though modest juvenat treatments make him appear to be a robust fifty year old."
+      }
+    ],
+    "links": ["Scintilla", "Lucid_Palace", "House_Hax"],
+    "categories": ["Calixis Sector", "Imperium of Man", "Nobility"],
+    "depth": 1
+  },
+  {
+    "title": "The_Lathes",
+    "display_title": "The Lathes",
+    "url": "https://calixipedia.fandom.com/wiki/The_Lathes",
+    "summary": "The Lathes are the foremost forge worlds of the sector, rivalling Scintilla's Gunmetal City for weapons manufacture. The three planetoids, Lathe-Het, Lathe-Hesh and Lathe-Hadd enjoy an anarchic, fluxing orbit around their violent blue-white sun.",
+    "sections": [
+      {
+        "heading": "_lead",
+        "text": "The Lathes are the foremost forge worlds of the sector, rivalling Scintilla's Gunmetal City for weapons manufacture. The three planetoids, Lathe-Het, Lathe-Hesh and Lathe-Hadd enjoy an anarchic, fluxing orbit around their violent blue-white sun, intersecting to produce events of hyper-gravity. Lathe-world blades are famed throughout the Calixis Sector for their unbreakable character."
+      },
+      {
+        "heading": "Mechanicus presence",
+        "text": "Since their founding, the Mechanicum of the Lathes have converted nearly every object in the system to the purposes of the Machine God. The Adeptus Mechanicus has spread throughout Calixis, and the Arch-Magos of the Lathe-Covenant drive to maintain firm control over their far-flung holdings."
+      }
+    ],
+    "links": ["Adeptus_Mechanicus", "Sheol_17", "Lathe-Het"],
+    "categories": ["Calixis Sector", "Forge Worlds", "Locations"],
+    "depth": 1
+  },
+  {
+    "title": "The_Periphery",
+    "display_title": "The Periphery",
+    "url": "https://calixipedia.fandom.com/wiki/The_Periphery",
+    "summary": "The Periphery is the most remote of the several sub-sectors of the Calixis Sector, being the only sub-sector to not directly share a border with the Golgenna Reach.",
+    "sections": [
+      {
+        "heading": "_lead",
+        "text": "The Periphery is the most remote of the several sub-sectors of the Calixis Sector, being the only sub-sector to not directly share a border with the Golgenna Reach, of which it is located spinward. It is bordered by the Malfian Sub-sector and the Markayn Marches. As it is a remote region, it is home to many isolated planets and frontier worlds that struggle to survive in the face of their marginalization. The Arch-Diocese of both the Periphery and the nearby Halo Stars is overseen by Cardinal Fortis, who rules not from a planet as his seat of power, but a ship, the Pax Calixis."
+      }
+    ],
+    "links": ["Malfian_Sub-sector", "Markayn_Marches", "Cardinal_Fortis"],
+    "categories": ["Calixis Sector", "Sub-sectors"],
+    "depth": 1
+  }
+]

@@ -272,6 +272,13 @@ export function LorebooksPanel() {
           <Sparkles size="0.8125rem" /> <span className="md:hidden">Maker</span>
         </button>
         <button
+          onClick={() => openModal("wiki-lorebook")}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-xs font-medium text-[var(--secondary-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] active:scale-[0.98]"
+          title="From Wiki"
+        >
+          <Globe size="0.8125rem" /> <span className="md:hidden">Wiki</span>
+        </button>
+        <button
           onClick={() => {
             if (selectionMode) exitSelectionMode();
             else setSelectionMode(true);

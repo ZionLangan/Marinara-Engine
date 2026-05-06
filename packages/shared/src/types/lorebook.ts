@@ -36,7 +36,7 @@ export interface Lorebook {
   /** Tags for organizing/filtering lorebooks */
   tags: string[];
   /** Agent/generation origin tracking */
-  generatedBy: "user" | "agent" | "import" | null;
+  generatedBy: "user" | "agent" | "import" | "lorebook-maker" | "wiki-import" | null;
   sourceAgentId: string | null;
   createdAt: string;
   updatedAt: string;
