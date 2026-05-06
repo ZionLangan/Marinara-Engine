@@ -1083,7 +1083,7 @@ export const ChatMessage = memo(function ChatMessage({
 
   const discoSkillColors = personaInfo?.discoSkillColors;
   const renderedContent = useMemo(() => {
-    return renderContent(text, dialogueColor, speakerColorMap, boldDialogue, htmlScopeClass, discoSkillColors);
+    return renderContent(text, dialogueColor, speakerColorMap, boldDialogue, discoSkillColors, htmlScopeClass);
   }, [text, dialogueColor, speakerColorMap, boldDialogue, htmlScopeClass, discoSkillColors]);
 
   const handleCopy = () => {

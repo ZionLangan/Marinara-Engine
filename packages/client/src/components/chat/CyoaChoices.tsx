@@ -308,7 +308,7 @@ export function CyoaChoices({ messages }: Props) {
             <button
               key={i}
               type="button"
-              onClick={() => handleChoice(choice.text)}
+              onClick={() => handleChoice(choice)}
               disabled={isStreaming || isRerolling}
               className="group relative rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-4 py-2.5 text-left backdrop-blur-md transition-all hover:border-purple-400/40 hover:bg-purple-500/10 hover:shadow-lg hover:shadow-purple-500/5 active:scale-[0.98] disabled:opacity-50 dark:border-white/10 dark:bg-black/50"
             >
