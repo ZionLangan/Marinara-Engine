@@ -1,8 +1,22 @@
 // ──────────────────────────────────────────────
 // Panel: Agents & Tools
 // ──────────────────────────────────────────────
-import { useState } from "react";
-import { Sparkles, Pencil, Plus, Wrench, ChevronDown, Trash2, Regex, PenLine, Radar, Puzzle } from "lucide-react";
+import { useMemo, useState } from "react";
+import {
+  Sparkles,
+  Pencil,
+  Plus,
+  Wrench,
+  ChevronDown,
+  Trash2,
+  Regex,
+  PenLine,
+  Radar,
+  Puzzle,
+  GripVertical,
+  ToggleLeft,
+  ToggleRight,
+} from "lucide-react";
 import { useUIStore } from "../../stores/ui.store";
 import { useAgentConfigs, useDeleteAgent, type AgentConfigRow } from "../../hooks/use-agents";
 import { useCustomTools, useDeleteCustomTool, type CustomToolRow } from "../../hooks/use-custom-tools";
@@ -10,14 +24,13 @@ import {
   useRegexScripts,
   useDeleteRegexScript,
   useCreateRegexScript,
+  useUpdateRegexScript,
+  useReorderRegexScripts,
   type RegexScriptRow,
 } from "../../hooks/use-regex-scripts";
 import { BUILT_IN_AGENTS, type AgentCategory } from "@marinara-engine/shared";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
-
-const HIDDEN_BUILT_IN_AGENT_IDS = new Set(["game-master", "party-player"]);
-const VISIBLE_BUILT_IN_AGENTS = BUILT_IN_AGENTS.filter((agent) => !HIDDEN_BUILT_IN_AGENT_IDS.has(agent.id));
 
 export function AgentsPanel() {
   const { data: agentConfigs, isLoading } = useAgentConfigs();
@@ -26,6 +39,8 @@ export function AgentsPanel() {
   const deleteAgent = useDeleteAgent();
   const deleteTool = useDeleteCustomTool();
   const deleteRegex = useDeleteRegexScript();
+  const updateRegex = useUpdateRegexScript();
+  const reorderRegexScripts = useReorderRegexScripts();
   const openAgentDetail = useUIStore((s) => s.openAgentDetail);
   const openToolDetail = useUIStore((s) => s.openToolDetail);
   const openRegexDetail = useUIStore((s) => s.openRegexDetail);
@@ -33,6 +48,13 @@ export function AgentsPanel() {
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"category" | "status">("category");
+  const [draggedRegexId, setDraggedRegexId] = useState<string | null>(null);
+  const [regexDragReadyId, setRegexDragReadyId] = useState<string | null>(null);
+
+  const sortedRegexScripts = useMemo(
+    () => [...((regexScripts ?? []) as RegexScriptRow[])].sort((a, b) => a.order - b.order),
+    [regexScripts],
+  );
 
   // Handler for importing regex scripts from JSON (supports ST format and native)
   const handleImportRegex = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -103,7 +125,7 @@ export function AgentsPanel() {
   const configByType = new Map(((agentConfigs ?? []) as AgentConfigRow[]).map((config) => [config.type, config]));
 
   const statusAgents = [
-    ...VISIBLE_BUILT_IN_AGENTS.map((agent) => ({
+    ...BUILT_IN_AGENTS.map((agent) => ({
       id: agent.id,
       type: agent.id,
       name: agent.name,
@@ -137,6 +159,20 @@ export function AgentsPanel() {
 
   const handleCreateRegex = () => {
     openRegexDetail("__new__");
+  };
+
+  const handleRegexDrop = (targetId: string) => {
+    if (!draggedRegexId || draggedRegexId === targetId) return;
+    const nextIds = sortedRegexScripts.map((script) => script.id);
+    const from = nextIds.indexOf(draggedRegexId);
+    const to = nextIds.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const [moved] = nextIds.splice(from, 1);
+    if (!moved) return;
+    nextIds.splice(to, 0, moved);
+    reorderRegexScripts.mutate(nextIds);
+    setDraggedRegexId(null);
+    setRegexDragReadyId(null);
   };
 
   return (
@@ -211,10 +247,10 @@ export function AgentsPanel() {
         </div>
         {importError && <div className="text-xs text-red-500 mb-1">{importError}</div>}
         {importSuccess && <div className="text-xs text-green-500 mb-1">{importSuccess}</div>}
-        {!regexScripts || (regexScripts as RegexScriptRow[]).length === 0 ? (
+        {sortedRegexScripts.length === 0 ? (
           <p className="text-[0.625rem] text-[var(--muted-foreground)] px-1 py-2">No regex scripts yet.</p>
         ) : (
-          (regexScripts as RegexScriptRow[]).map((script) => {
+          sortedRegexScripts.map((script) => {
             const placements = (() => {
               try {
                 return JSON.parse(script.placement) as string[];
@@ -229,8 +265,44 @@ export function AgentsPanel() {
                 className={cn(
                   "flex items-start gap-2.5 rounded-lg p-2 transition-colors hover:bg-[var(--sidebar-accent)]",
                   !enabled && "opacity-50",
+                  draggedRegexId === script.id && "opacity-40",
                 )}
+                draggable={regexDragReadyId === script.id}
+                onDragStart={(event) => {
+                  setDraggedRegexId(script.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", script.id);
+                }}
+                onDragOver={(event) => {
+                  if (draggedRegexId && draggedRegexId !== script.id) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  handleRegexDrop(script.id);
+                }}
+                onDragEnd={() => {
+                  setDraggedRegexId(null);
+                  setRegexDragReadyId(null);
+                }}
               >
+                <button
+                  className="mt-0.5 shrink-0 cursor-grab rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:cursor-grabbing"
+                  title="Drag to reorder"
+                  onClick={(event) => event.stopPropagation()}
+                  onMouseDown={(event) => {
+                    event.stopPropagation();
+                    setRegexDragReadyId(script.id);
+                  }}
+                  onMouseUp={(event) => {
+                    event.stopPropagation();
+                    setRegexDragReadyId(null);
+                  }}
+                >
+                  <GripVertical size="0.8125rem" />
+                </button>
                 <Regex size="0.875rem" className="mt-0.5 shrink-0 text-orange-400" />
                 <button className="min-w-0 flex-1 text-left" onClick={() => openRegexDetail(script.id)}>
                   <div className="text-xs font-medium">{script.name}</div>
@@ -247,6 +319,20 @@ export function AgentsPanel() {
                       /{script.findRegex}/{script.flags}
                     </span>
                   </div>
+                </button>
+                <button
+                  className="mt-0.5 shrink-0 text-[var(--muted-foreground)] transition-colors hover:text-[var(--primary)]"
+                  title={enabled ? "Disable script" : "Enable script"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    updateRegex.mutate({ id: script.id, enabled: !enabled });
+                  }}
+                >
+                  {enabled ? (
+                    <ToggleRight size="0.875rem" className="text-amber-400" />
+                  ) : (
+                    <ToggleLeft size="0.875rem" />
+                  )}
                 </button>
                 <button
                   className="mt-0.5 shrink-0 text-[var(--muted-foreground)] transition-colors hover:text-[var(--primary)]"
@@ -302,7 +388,7 @@ export function AgentsPanel() {
               desc: "Utilities, combat, illustrations, and other helpers.",
             },
           ].map(({ category, title, icon, desc }) => {
-            const agents = VISIBLE_BUILT_IN_AGENTS.filter((a) => a.category === category);
+            const agents = BUILT_IN_AGENTS.filter((a) => a.category === category);
             return (
               <PanelSection key={category} title={title} icon={icon}>
                 <div className="mb-1.5 text-[0.625rem] text-[var(--muted-foreground)]">{desc}</div>

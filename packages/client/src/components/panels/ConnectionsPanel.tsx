@@ -40,6 +40,7 @@ const PROVIDER_COLORS: Record<string, { from: string; to: string; ring: string; 
   mistral: { from: "from-violet-400", to: "to-purple-500", ring: "ring-violet-400/40", badge: "bg-violet-400" },
   cohere: { from: "from-rose-400", to: "to-pink-500", ring: "ring-rose-400/40", badge: "bg-rose-400" },
   openrouter: { from: "from-sky-400", to: "to-cyan-500", ring: "ring-sky-400/40", badge: "bg-sky-400" },
+  xai: { from: "from-neutral-300", to: "to-zinc-600", ring: "ring-zinc-300/40", badge: "bg-zinc-300" },
   custom: { from: "from-gray-400", to: "to-slate-500", ring: "ring-gray-400/40", badge: "bg-gray-400" },
   image_generation: {
     from: "from-fuchsia-400",

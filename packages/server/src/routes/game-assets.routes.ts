@@ -9,6 +9,7 @@ import { execFile } from "child_process";
 import { platform } from "os";
 import { z } from "zod";
 import { pipeline } from "stream/promises";
+import { MUSIC_GENRES, MUSIC_INTENSITIES } from "@marinara-engine/shared";
 import { GAME_ASSETS_DIR, buildAssetManifest, getAssetManifest } from "../services/game/asset-manifest.service.js";
 
 const MIME_MAP: Record<string, string> = {
@@ -39,6 +40,10 @@ const CATEGORY_EXTENSIONS: Record<string, Set<string>> = {
 };
 const VALID_CATEGORIES = new Set(Object.keys(CATEGORY_EXTENSIONS));
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MUSIC_STATES = ["exploration", "dialogue", "combat", "travel_rest"] as const;
+const MUSIC_STATE_SET = new Set<string>(MUSIC_STATES);
+const MUSIC_GENRE_SET = new Set<string>(MUSIC_GENRES);
+const MUSIC_INTENSITY_SET = new Set<string>(MUSIC_INTENSITIES);
 
 /** Reject path-traversal attempts. */
 function isSafePath(segment: string): boolean {
@@ -88,6 +93,21 @@ function uniqueFilename(dir: string, filename: string): string {
 function prepareAssetTarget(category: string, subcategory: string, filename: string) {
   if (!isSafePath(subcategory)) {
     throw new Error("Invalid subcategory");
+  }
+  if (category === "music") {
+    const parts = subcategory.split("/").filter(Boolean);
+    const [state, genre, intensity] = parts;
+    if (
+      parts.length !== 3 ||
+      !state ||
+      !genre ||
+      !intensity ||
+      !MUSIC_STATE_SET.has(state) ||
+      !MUSIC_GENRE_SET.has(genre) ||
+      !MUSIC_INTENSITY_SET.has(intensity)
+    ) {
+      throw new Error("Music folder must be state/genre/intensity, e.g. exploration/fantasy/calm");
+    }
   }
 
   const ext = extname(filename).toLowerCase();

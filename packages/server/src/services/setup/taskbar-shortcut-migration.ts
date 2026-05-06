@@ -9,7 +9,7 @@
 // Idempotent: if a shortcut already targets the launcher we skip it. Only
 // shortcuts that currently point at *this* install's start.bat are touched —
 // other Marinara installs and unrelated shortcuts are left alone.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { logger } from "../../lib/logger.js";
@@ -17,32 +17,93 @@ import { logger } from "../../lib/logger.js";
 const AUMID = "Pasta-Devs.MarinaraEngine";
 const SHORTCUT_TITLE = "Marinara Engine";
 
-// Hard timeout per child-process hop. The migration runs synchronously on
-// the server boot path, so a stalled powershell.exe or hung COM shortcut
-// API must not be allowed to hold startup hostage indefinitely.
+// Hard timeout per child-process hop. The migration is scheduled after the
+// server starts listening, and child processes are async so slow shortcut COM
+// calls cannot block Fastify startup.
 const SPAWN_TIMEOUT_MS = 5_000;
 
-function readShortcutTarget(lnkPath: string): string | null {
+type ChildRunResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+};
+
+function runChild(
+  command: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+): Promise<ChildRunResult> {
+  return new Promise((resolveResult) => {
+    let settled = false;
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let timeout: NodeJS.Timeout | undefined;
+    let killFallback: NodeJS.Timeout | undefined;
+
+    const finish = (result: ChildRunResult) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (killFallback) clearTimeout(killFallback);
+      resolveResult(result);
+    };
+
+    const child = spawn(command, args, {
+      env: options.env,
+      windowsHide: true,
+    });
+
+    timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+      killFallback = setTimeout(() => {
+        finish({ status: null, stdout, stderr, timedOut });
+      }, 1_000);
+      killFallback.unref?.();
+    }, options.timeoutMs ?? SPAWN_TIMEOUT_MS);
+    timeout.unref?.();
+
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => {
+      finish({ status: null, stdout, stderr, timedOut });
+    });
+    child.on("close", (code) => {
+      finish({ status: timedOut ? null : code, stdout, stderr, timedOut });
+    });
+  });
+}
+
+async function readShortcutTarget(lnkPath: string): Promise<string | null> {
   const cmd = "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK); " + "Write-Output $s.TargetPath";
-  const res = spawnSync(
+  const res = await runChild(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd],
     {
-      encoding: "utf8",
       env: { ...process.env, LNK: lnkPath },
-      windowsHide: true,
-      timeout: SPAWN_TIMEOUT_MS,
     },
   );
   if (res.status !== 0) return null;
-  return (res.stdout ?? "").trim() || null;
+  return res.stdout.trim() || null;
 }
 
 function pathsEqual(a: string, b: string): boolean {
   return resolve(a).toLowerCase() === resolve(b).toLowerCase();
 }
 
-function rewriteShortcut(lnkPath: string, exe: string, args: string, workDir: string, icon: string): boolean {
+async function rewriteShortcut(
+  lnkPath: string,
+  exe: string,
+  args: string,
+  workDir: string,
+  icon: string,
+): Promise<boolean> {
   const cmd =
     "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK); " +
     "$s.TargetPath = $env:EXE; " +
@@ -50,62 +111,50 @@ function rewriteShortcut(lnkPath: string, exe: string, args: string, workDir: st
     "$s.WorkingDirectory = $env:WD; " +
     "$s.IconLocation = $env:ICON; " +
     "$s.Save()";
-  const res = spawnSync(
+  const res = await runChild(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd],
     {
-      encoding: "utf8",
       env: { ...process.env, LNK: lnkPath, EXE: exe, ARGS: args, WD: workDir, ICON: icon },
-      windowsHide: true,
-      timeout: SPAWN_TIMEOUT_MS,
     },
   );
   return res.status === 0;
 }
 
-function readShortcutIconLocation(lnkPath: string): string | null {
+async function readShortcutIconLocation(lnkPath: string): Promise<string | null> {
   const cmd = "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK); " + "Write-Output $s.IconLocation";
-  const res = spawnSync(
+  const res = await runChild(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd],
     {
-      encoding: "utf8",
       env: { ...process.env, LNK: lnkPath },
-      windowsHide: true,
-      timeout: SPAWN_TIMEOUT_MS,
     },
   );
   if (res.status !== 0) return null;
-  return (res.stdout ?? "").trim() || null;
+  return res.stdout.trim() || null;
 }
 
-function repairShortcutIcon(lnkPath: string, icon: string): boolean {
+async function repairShortcutIcon(lnkPath: string, icon: string): Promise<boolean> {
   const cmd =
     "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK); " +
     "$s.IconLocation = $env:ICON; " +
     "$s.Save()";
-  const res = spawnSync(
+  const res = await runChild(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", cmd],
     {
-      encoding: "utf8",
       env: { ...process.env, LNK: lnkPath, ICON: icon },
-      windowsHide: true,
-      timeout: SPAWN_TIMEOUT_MS,
     },
   );
   return res.status === 0;
 }
 
-function stampAumid(launcherExe: string, lnkPath: string): boolean {
-  const res = spawnSync(launcherExe, ["--stamp-lnk", lnkPath, AUMID], {
-    windowsHide: true,
-    timeout: SPAWN_TIMEOUT_MS,
-  });
+async function stampAumid(launcherExe: string, lnkPath: string): Promise<boolean> {
+  const res = await runChild(launcherExe, ["--stamp-lnk", lnkPath, AUMID]);
   return res.status === 0;
 }
 
-export function migrateTaskbarShortcuts(installDir: string): void {
+export async function migrateTaskbarShortcuts(installDir: string): Promise<void> {
   if (process.platform !== "win32") return;
 
   const launcherExe = join(installDir, "MarinaraLauncher.exe");
@@ -159,7 +208,7 @@ export function migrateTaskbarShortcuts(installDir: string): void {
   for (const lnk of candidates) {
     if (!existsSync(lnk)) continue;
 
-    const currentTarget = readShortcutTarget(lnk);
+    const currentTarget = await readShortcutTarget(lnk);
     if (!currentTarget) {
       logger.warn("Taskbar migration: could not read target for %s, skipping", lnk);
       continue;
@@ -170,12 +219,12 @@ export function migrateTaskbarShortcuts(installDir: string): void {
       // that no longer exists OR at the legacy installer/ path that the
       // win/ reorganization moved. Either way, repoint at the canonical
       // win/installer/app-icon.ico.
-      const currentIcon = readShortcutIconLocation(lnk);
+      const currentIcon = await readShortcutIconLocation(lnk);
       const currentIconPath = (currentIcon ?? "").replace(/,\d+$/, "");
       const isLegacyPath = currentIconPath ? pathsEqual(currentIconPath, legacyIconPath) : false;
       const isMissing = currentIconPath ? !existsSync(currentIconPath) : false;
       if ((isLegacyPath || isMissing) && existsSync(iconPath)) {
-        if (repairShortcutIcon(lnk, iconLocation)) {
+        if (await repairShortcutIcon(lnk, iconLocation)) {
           logger.info("Repaired taskbar shortcut icon: %s", lnk);
         } else {
           logger.warn("Taskbar migration: failed to repair icon on %s", lnk);
@@ -191,12 +240,12 @@ export function migrateTaskbarShortcuts(installDir: string): void {
       continue;
     }
 
-    if (!rewriteShortcut(lnk, launcherExe, argsLine, workDir, iconLocation)) {
+    if (!(await rewriteShortcut(lnk, launcherExe, argsLine, workDir, iconLocation))) {
       logger.warn("Taskbar migration: failed to rewrite %s", lnk);
       continue;
     }
 
-    if (!stampAumid(launcherExe, lnk)) {
+    if (!(await stampAumid(launcherExe, lnk))) {
       logger.warn("Taskbar migration: failed to stamp AUMID on %s", lnk);
       continue;
     }

@@ -77,9 +77,9 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[3px]" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl">
-          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 max-md:pt-[max(0.75rem,env(safe-area-inset-top))] max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4">
+        <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl sm:max-h-[min(90dvh,38rem)]">
+          <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
             <div className="flex items-center gap-2">
               <span className="text-[var(--primary)]">{MODE_META[mode].icon}</span>
               <div>
@@ -97,7 +97,7 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
             </button>
           </div>
 
-          <div className="space-y-4 px-4 py-4">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4">
             {showEmptyState ? (
               <div className="rounded-xl border border-[var(--primary)]/20 bg-[var(--primary)]/8 p-4">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium text-[var(--foreground)]">
@@ -137,7 +137,7 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
             )}
           </div>
 
-          <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-3">
+          <div className="flex shrink-0 items-center justify-between border-t border-[var(--border)] px-4 py-3">
             <button
               onClick={onClose}
               className="rounded-lg px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"

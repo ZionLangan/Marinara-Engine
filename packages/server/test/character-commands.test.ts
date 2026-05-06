@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseCharacterCommands } from "../src/services/conversation/character-commands.js";
+import { parseCharacterCommands, parseDirectMessageCommands } from "../src/services/conversation/character-commands.js";
 
 test("parses create_character with expanded card fields", () => {
   const { commands, cleanContent } = parseCharacterCommands(
@@ -65,6 +65,64 @@ test("parses update_persona with scenario and backstory", () => {
       name: "Alex Storm",
       scenario: "Urban fantasy city",
       backstory: "Former detective",
+    },
+  ]);
+});
+
+test("parses create_lorebook JSON block and strips it from visible text", () => {
+  const { commands, cleanContent } = parseCharacterCommands(
+    `I'll make that lorebook now.\n<create_lorebook>{"name":"Arcadia World Lore","description":"Setting notes","category":"world","tags":["fantasy"],"entries":[{"name":"Silver Court","content":"The Silver Court rules the north.","keys":["Silver Court","north"],"tag":"faction","constant":false}]}</create_lorebook>`,
+  );
+
+  assert.equal(cleanContent, "I'll make that lorebook now.");
+  assert.deepEqual(commands, [
+    {
+      type: "create_lorebook",
+      name: "Arcadia World Lore",
+      description: "Setting notes",
+      category: "world",
+      tags: ["fantasy"],
+      entries: [
+        {
+          name: "Silver Court",
+          content: "The Silver Court rules the north.",
+          description: undefined,
+          keys: ["Silver Court", "north"],
+          secondaryKeys: undefined,
+          tag: "faction",
+          constant: false,
+          selective: undefined,
+        },
+      ],
+    },
+  ]);
+});
+
+test("parses loose selfie command context variants", () => {
+  const { commands, cleanContent } = parseCharacterCommands(
+    `Here you go. [selfie] [selfie: context="rainy kitchen"] [selfie: "new dress"] [selfie: sleepy morning hair]`,
+  );
+
+  assert.equal(cleanContent, "Here you go.");
+  assert.deepEqual(commands, [
+    { type: "selfie", context: undefined },
+    { type: "selfie", context: "rainy kitchen" },
+    { type: "selfie", context: "new dress" },
+    { type: "selfie", context: "sleepy morning hair" },
+  ]);
+});
+
+test("parses roleplay direct-message commands without exposing them in visible text", () => {
+  const { commands, cleanContent } = parseDirectMessageCommands(
+    `He glances down at the glowing screen. [dm: character="Dottore" message="come to the lab when you can"] The moment passes.`,
+  );
+
+  assert.equal(cleanContent, "He glances down at the glowing screen.  The moment passes.");
+  assert.deepEqual(commands, [
+    {
+      type: "dm",
+      character: "Dottore",
+      message: "come to the lab when you can",
     },
   ]);
 });

@@ -3,7 +3,14 @@
 // ──────────────────────────────────────────────
 import type { BaseLLMProvider, ChatMessage, LLMToolDefinition, LLMToolCall } from "../llm/base-provider.js";
 import type { AgentResult, AgentContext, AgentResultType } from "@marinara-engine/shared";
-import { getDefaultAgentPrompt } from "@marinara-engine/shared";
+import {
+  DEFAULT_AGENT_CONTEXT_SIZE,
+  DEFAULT_AGENT_MAX_TOKENS,
+  MAX_AGENT_MAX_TOKENS,
+  MIN_AGENT_MAX_TOKENS,
+  getDefaultAgentPrompt,
+} from "@marinara-engine/shared";
+import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger } from "../../lib/logger.js";
 
 /** Strip HTML/XML-style tags (e.g. <div style="..."> <br> <speaker>) from text to save tokens. */
@@ -72,6 +79,15 @@ function formatToolPayloadForLog(payload: string, maxLength = 400): string {
   }
 }
 
+function normalizeAgentMaxTokens(value: unknown, fallback = DEFAULT_AGENT_MAX_TOKENS): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(MIN_AGENT_MAX_TOKENS, Math.min(MAX_AGENT_MAX_TOKENS, Math.trunc(value)));
+}
+
+function applyProviderMaxTokensOverride(provider: BaseLLMProvider, maxTokens: number): number {
+  return provider.maxTokensOverrideValue !== null ? Math.min(maxTokens, provider.maxTokensOverrideValue) : maxTokens;
+}
+
 /**
  * Execute a single agent: build prompt → call LLM → parse response.
  * If toolContext is provided, the agent can make tool calls in a loop.
@@ -110,14 +126,12 @@ export async function executeAgent(
     }
 
     // Build multi-turn message array for this agent (sliced to its own contextSize)
-    const agentContextSize = (config.settings.contextSize as number) || 5;
+    const agentContextSize = (config.settings.contextSize as number) || DEFAULT_AGENT_CONTEXT_SIZE;
     const messages = buildAgentMessages(systemParts.join("\n"), context, config.type, agentContextSize);
 
     // Agents use lower temperature for reliability
     const temperature = (config.settings.temperature as number) ?? 0.3;
-    const rawMaxTokens = Math.max((config.settings.maxTokens as number) ?? 4096, 16384);
-    const maxTokens =
-      provider.maxTokensOverrideValue !== null ? Math.min(rawMaxTokens, provider.maxTokensOverrideValue) : rawMaxTokens;
+    const maxTokens = applyProviderMaxTokensOverride(provider, normalizeAgentMaxTokens(config.settings.maxTokens));
     const streamResponses = context.streaming !== false;
 
     // If tools are available, use the tool call loop
@@ -165,7 +179,7 @@ export async function executeAgent(
     logger.debug(`[agent] ${config.type} raw response: ${responseText.slice(0, 500)}`);
 
     // Parse the result based on agent type
-    const parsed = parseAgentResponse(config.type, responseText);
+    const parsed = parseAgentResponse(config, responseText);
 
     return {
       agentId: config.id,
@@ -201,7 +215,7 @@ async function executeAgentWithTools(
   const MAX_TOOL_ROUNDS = 5;
   const loopMessages = [...initialMessages];
   let totalTokens = 0;
-  const debugAgentsEnabled = logger.isLevelEnabled("debug");
+  const debugAgentsEnabled = isDebugAgentsEnabled() && logger.isLevelEnabled("debug");
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const result = await provider.chatComplete(loopMessages, {
@@ -218,7 +232,7 @@ async function executeAgentWithTools(
     // No tool calls → final response
     if (!result.toolCalls || result.toolCalls.length === 0) {
       const responseText = result.content?.trim() ?? "";
-      const parsed = parseAgentResponse(config.type, responseText);
+      const parsed = parseAgentResponse(config, responseText);
       return {
         agentId: config.id,
         agentType: config.type,
@@ -274,7 +288,7 @@ async function executeAgentWithTools(
   });
   totalTokens += finalResult.usage?.totalTokens ?? 0;
   const responseText = finalResult.content?.trim() ?? "";
-  const parsed = parseAgentResponse(config.type, responseText);
+  const parsed = parseAgentResponse(config, responseText);
   return {
     agentId: config.id,
     agentType: config.type,
@@ -319,22 +333,23 @@ export async function executeAgentBatch(
     // Build merged system prompt (includes lore + agent extras)
     const systemPrompt = buildBatchSystemPrompt(configs, context);
     // Batch uses the max contextSize among its members
-    const batchContextSize = Math.max(...configs.map((c) => (c.settings.contextSize as number) || 5));
+    const batchContextSize = Math.max(
+      ...configs.map((c) => (c.settings.contextSize as number) || DEFAULT_AGENT_CONTEXT_SIZE),
+    );
     const messages = buildAgentMessages(systemPrompt, context, "__batch__", batchContextSize);
 
-    // Each agent needs enough room for its full JSON output.
-    // Use a generous floor (16384) so the model never runs out mid-response.
-    // Cap to the connection-level maxTokensOverride when set.
-    const maxTokensPerAgent = Math.max(...configs.map((c) => (c.settings.maxTokens as number) ?? 4096));
+    // Each agent reserves its own configured output budget. The context fitter
+    // may still reduce this further if the prompt needs more room.
+    const perAgentTokens = configs.map((c) => normalizeAgentMaxTokens(c.settings.maxTokens));
     const temperature = Math.min(...configs.map((c) => (c.settings.temperature as number) ?? 0.3));
-    const rawBatchMaxTokens = Math.max(maxTokensPerAgent * configs.length, 16384);
-    const batchMaxTokens =
-      provider.maxTokensOverrideValue !== null
-        ? Math.min(rawBatchMaxTokens, provider.maxTokensOverrideValue)
-        : rawBatchMaxTokens;
+    const rawBatchMaxTokens = Math.min(
+      perAgentTokens.reduce((sum, tokens) => sum + tokens, 0),
+      MAX_AGENT_MAX_TOKENS,
+    );
+    const batchMaxTokens = applyProviderMaxTokensOverride(provider, rawBatchMaxTokens);
     const streamResponses = context.streaming !== false;
     logger.info(
-      `[agent-batch] maxTokens: ${batchMaxTokens} (${maxTokensPerAgent} × ${configs.length} agents, floor 16384${provider.maxTokensOverrideValue !== null ? `, capped at ${provider.maxTokensOverrideValue}` : ""})`,
+      `[agent-batch] maxTokens: ${batchMaxTokens} (sum=${rawBatchMaxTokens} from [${perAgentTokens.join(", ")}]${provider.maxTokensOverrideValue !== null ? `, capped at ${provider.maxTokensOverrideValue}` : ""})`,
     );
 
     logger.debug(`\n[agent-batch] ═══ BATCH PROMPT — [${configs.map((c) => c.type).join(", ")}] — ${model} ═══`);
@@ -458,7 +473,7 @@ function buildBatchSystemPrompt(configs: AgentExecConfig[], context: AgentContex
   parts.push(``);
   parts.push(`─── REQUIRED OUTPUT FORMAT ───`);
   for (const config of configs) {
-    const isJson = JSON_AGENTS.has(config.type);
+    const isJson = agentResponseIsJson(config);
     parts.push(
       `<result agent="${config.type}">`,
       isJson ? `{ ... valid JSON ... }` : `... your text output ...`,
@@ -520,7 +535,7 @@ function parseBatchResponse(
     }
 
     if (matchedOutput !== null) {
-      const parsedResult = parseAgentResponse(config.type, matchedOutput);
+      const parsedResult = parseAgentResponse(config, matchedOutput);
       parsed.push({
         agentId: config.id,
         agentType: config.type,
@@ -550,7 +565,7 @@ function makeError(config: AgentExecConfig, error: string, startTime: number): A
   return {
     agentId: config.id,
     agentType: config.type,
-    type: AGENT_RESULT_TYPE_MAP[config.type] ?? "context_injection",
+    type: resolveAgentResultType(config),
     data: null,
     tokensUsed: 0,
     durationMs: Date.now() - startTime,
@@ -807,7 +822,7 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
 
   if (context.memory._existingLorebookEntries) {
     const rawEntries = context.memory._existingLorebookEntries as Array<
-      string | { name?: string; keys?: string[]; locked?: boolean }
+      string | { id?: string; name?: string; content?: string; keys?: string[]; locked?: boolean }
     >;
     const entries = rawEntries
       .map((entry) => {
@@ -815,10 +830,16 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
         if (!entry || typeof entry !== "object") return null;
 
         const name = typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : "Unnamed";
+        const id = typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : "";
+        const content = typeof entry.content === "string" ? entry.content.trim() : "";
         const keys = Array.isArray(entry.keys) ? entry.keys.filter((key) => typeof key === "string") : [];
-        const keyText = keys.length > 0 ? ` | keys: ${keys.join(", ")}` : "";
-        const lockedText = entry.locked === true ? " | locked" : "";
-        return `- ${name}${keyText}${lockedText}`;
+        const attrs = [
+          id ? `id="${escapeXml(id)}"` : "",
+          `name="${escapeXml(name)}"`,
+          keys.length > 0 ? `keys="${escapeXml(keys.join(", "))}"` : "",
+          entry.locked === true ? `locked="true"` : "",
+        ].filter(Boolean);
+        return [`<entry ${attrs.join(" ")}>`, `<content>${escapeXml(content)}</content>`, `</entry>`].join("\n");
       })
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
 
@@ -932,6 +953,49 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   "disco-skills": "context_injection",
 };
 
+const AGENT_RESULT_TYPES = new Set<AgentResultType>([
+  "game_state_update",
+  "text_rewrite",
+  "sprite_change",
+  "echo_message",
+  "quest_update",
+  "image_prompt",
+  "context_injection",
+  "continuity_check",
+  "director_event",
+  "lorebook_update",
+  "character_card_update",
+  "prompt_review",
+  "background_change",
+  "character_tracker_update",
+  "persona_stats_update",
+  "custom_tracker_update",
+  "chat_summary",
+  "spotify_control",
+  "haptic_command",
+  "cyoa_choices",
+  "secret_plot",
+  "game_master_narration",
+  "party_action",
+  "game_map_update",
+  "game_state_transition",
+]);
+
+const TEXT_RESULT_TYPES = new Set<AgentResultType>(["context_injection", "director_event"]);
+
+export function resolveAgentResultType(config: Pick<AgentExecConfig, "type" | "settings">): AgentResultType {
+  const configured = config.settings?.resultType;
+  if (typeof configured === "string" && AGENT_RESULT_TYPES.has(configured as AgentResultType)) {
+    return configured as AgentResultType;
+  }
+  return AGENT_RESULT_TYPE_MAP[config.type] ?? "context_injection";
+}
+
+function agentResponseIsJson(config: Pick<AgentExecConfig, "type" | "settings">): boolean {
+  const resultType = resolveAgentResultType(config);
+  return JSON_AGENTS.has(config.type) || !TEXT_RESULT_TYPES.has(resultType);
+}
+
 /** Agents that return structured JSON. */
 const JSON_AGENTS = new Set([
   "world-state",
@@ -960,10 +1024,16 @@ const JSON_AGENTS = new Set([
 /**
  * Parse the raw LLM response into a typed result.
  */
-function parseAgentResponse(agentType: string, responseText: string): { type: AgentResultType; data: unknown } {
-  const resultType = AGENT_RESULT_TYPE_MAP[agentType] ?? "context_injection";
+function parseAgentResponse(
+  config: Pick<AgentExecConfig, "type" | "settings">,
+  responseText: string,
+): {
+  type: AgentResultType;
+  data: unknown;
+} {
+  const resultType = resolveAgentResultType(config);
 
-  if (JSON_AGENTS.has(agentType)) {
+  if (agentResponseIsJson(config)) {
     try {
       const jsonStr = extractJson(responseText);
       const data = JSON.parse(jsonStr);

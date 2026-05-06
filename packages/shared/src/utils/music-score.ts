@@ -1,189 +1,149 @@
 // ──────────────────────────────────────────────
-// Music Score — Rule-Based Selector
+// Game Audio Score — Rule-Based Selectors
 //
-// Maps (game state, weather, time, biome) to the
-// best available music tag without LLM involvement.
+// Music uses the structured format:
+// music:<state>:<genre>:<intensity>:<filename>
+//
+// Scene analysis provides compact direction fields (genre, intensity,
+// location kind); the server/client pick actual asset tags deterministically.
 // ──────────────────────────────────────────────
 
 import type { GameActiveState } from "../types/game.js";
 
+export const MUSIC_GENRES = [
+  "fantasy",
+  "horror",
+  "romance",
+  "mystery",
+  "scifi",
+  "modern",
+  "slice_of_life",
+  "adventure",
+  "drama",
+  "custom",
+] as const;
+export type MusicGenre = (typeof MUSIC_GENRES)[number];
+
+export const MUSIC_INTENSITIES = ["calm", "tense", "intense"] as const;
+export type MusicIntensity = (typeof MUSIC_INTENSITIES)[number];
+
+export const LOCATION_KINDS = ["interior", "exterior", "underground", "urban", "nature"] as const;
+export type LocationKind = (typeof LOCATION_KINDS)[number];
+
 export interface MusicScoreInput {
   state: GameActiveState;
+  /** Small tie-breaker only. Main music selection comes from musicGenre/musicIntensity. */
   weather?: string | null;
+  /** Small tie-breaker only. Main music selection comes from musicGenre/musicIntensity. */
   timeOfDay?: string | null;
+  musicGenre?: MusicGenre | string | null;
+  musicIntensity?: MusicIntensity | string | null;
   currentMusic?: string | null;
   recentMusic?: string[] | null;
   availableMusic: string[];
 }
 
-// ── State → primary subcategory ──
-
-const STATE_SUBCATEGORY: Record<GameActiveState, string> = {
-  exploration: "exploration",
-  dialogue: "dialogue",
-  combat: "combat",
-  travel_rest: "travel_rest",
-};
-
-const MIN_STATE_MUSIC_POOL_SIZE = 6;
-
-// ── Mood keyword associations ──
-// Each mood is an array of keywords that, when found in a tag's name parts
-// or in the context values, increase the tag's score.
-
-const MOOD_DARK = ["dark", "shadow", "eerie", "haunt", "ominous", "dread", "grim", "doom", "sinister", "tense"];
-const MOOD_BRIGHT = ["bright", "dream", "hope", "light", "peace", "gentle", "serene", "calm", "soft", "warm"];
-const MOOD_INTENSE = ["epic", "battle", "intense", "fierce", "urgent", "boss", "aggress", "war", "rage", "fury"];
-const MOOD_MYSTIC = ["mystic", "mystery", "ancient", "spirit", "ethereal", "enchant", "magic", "arcane"];
-
-// Weather → mood bias
-const WEATHER_MOOD: Record<string, string[]> = {
-  clear: MOOD_BRIGHT,
-  cloudy: [],
-  overcast: MOOD_DARK,
-  rain: MOOD_DARK,
-  heavy_rain: MOOD_DARK,
-  storm: [...MOOD_DARK, ...MOOD_INTENSE],
-  snow: MOOD_MYSTIC,
-  blizzard: MOOD_INTENSE,
-  fog: [...MOOD_DARK, ...MOOD_MYSTIC],
-  wind: [],
-  hail: MOOD_INTENSE,
-  sandstorm: MOOD_INTENSE,
-  heat_wave: MOOD_BRIGHT,
-};
-
-// Time → mood bias
-const TIME_MOOD: Record<string, string[]> = {
-  dawn: MOOD_BRIGHT,
-  morning: MOOD_BRIGHT,
-  noon: MOOD_BRIGHT,
-  afternoon: MOOD_BRIGHT,
-  evening: MOOD_DARK,
-  night: MOOD_DARK,
-  midnight: [...MOOD_DARK, ...MOOD_MYSTIC],
-};
-
-/**
- * Score how well a music tag's name keywords match the desired mood.
- */
-function moodScore(tagParts: string[], moodKeywords: string[]): number {
-  let score = 0;
-  for (const part of tagParts) {
-    for (const keyword of moodKeywords) {
-      if (part.includes(keyword) || keyword.includes(part)) {
-        score++;
-        break;
-      }
-    }
-  }
-  return score;
-}
-
-function pickRandom<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)]!;
-}
-
-function uniqueTags(tags: string[]): string[] {
-  return Array.from(new Set(tags));
-}
-
-/**
- * Pick the best music tag for the current game context.
- * Returns `null` when the current music is already appropriate.
- */
-export function scoreMusic(input: MusicScoreInput): string | null {
-  const { state, weather, timeOfDay, currentMusic, recentMusic, availableMusic } = input;
-
-  if (!availableMusic.length) return null;
-
-  // 1. Prefer the primary subcategory for this state, but only use it as the
-  //    whole pool when it has enough variety. Default installs often have just
-  //    one track per state folder; forcing that tiny pool makes music repeat
-  //    even when the user's full music library contains better alternatives.
-  const primarySub = STATE_SUBCATEGORY[state];
-  const primaryCandidates = availableMusic.filter((tag) => tag.split(":")[1] === primarySub);
-  const customCandidates = availableMusic.filter((tag) => tag.split(":")[1] === "custom");
-  const candidates =
-    primaryCandidates.length >= MIN_STATE_MUSIC_POOL_SIZE
-      ? primaryCandidates
-      : uniqueTags([...primaryCandidates, ...customCandidates, ...availableMusic]);
-
-  // 3. If only one candidate, pick it (skip scoring)
-  if (candidates.length === 1) {
-    return candidates[0] === currentMusic ? null : candidates[0]!;
-  }
-
-  // 4. Build mood keywords from context
-  const contextMood: string[] = [];
-  if (weather && WEATHER_MOOD[weather]) {
-    contextMood.push(...WEATHER_MOOD[weather]);
-  }
-  if (timeOfDay && TIME_MOOD[timeOfDay]) {
-    contextMood.push(...TIME_MOOD[timeOfDay]);
-  }
-
-  // 5. Score each candidate
-  const scored = candidates.map((tag) => {
-    const parts = tag
-      .toLowerCase()
-      .split(/[:\-_]+/)
-      .filter((p) => p.length > 1);
-    let score = contextMood.length > 0 ? moodScore(parts, contextMood) : 0;
-    const subcategory = tag.split(":")[1];
-    if (subcategory === primarySub) score += 2;
-    if (subcategory === "custom") score += 1;
-    return { tag, score };
-  });
-
-  // 6. Avoid the current track and a short recent-history window when possible.
-  const recentSet = new Set((recentMusic ?? []).filter((tag) => tag && tag !== currentMusic));
-  const nonCurrent = scored.filter((entry) => entry.tag !== currentMusic);
-  const nonRecent = nonCurrent.filter((entry) => !recentSet.has(entry.tag));
-  const poolBase = nonRecent.length > 0 ? nonRecent : nonCurrent.length > 0 ? nonCurrent : scored;
-  if (!poolBase.length) return null;
-
-  // 7. Prefer the strongest matches, but widen the pool until it is large
-  //    enough to prevent a tiny set of keyword-heavy filenames from monopolizing playback.
-  let threshold = Math.max(...poolBase.map((entry) => entry.score));
-  let selectionPool = poolBase.filter((entry) => entry.score >= threshold);
-  const targetPoolSize = Math.min(12, poolBase.length);
-
-  while (selectionPool.length < targetPoolSize && threshold > 0) {
-    threshold -= 1;
-    selectionPool = poolBase.filter((entry) => entry.score >= threshold);
-  }
-
-  return pickRandom(selectionPool).tag;
-}
-
-// ──────────────────────────────────────────────
-// Ambient Score — Deterministic Rule Engine
-// ──────────────────────────────────────────────
-
 export interface AmbientScoreInput {
   state: GameActiveState;
   weather?: string | null;
   timeOfDay?: string | null;
+  locationKind?: LocationKind | string | null;
   currentAmbient?: string | null;
   availableAmbient: string[];
-  /** LLM-selected background tag — helps infer interior/exterior. */
+  /** LLM-selected background tag — fallback only when locationKind is missing. */
   background?: string | null;
 }
 
+type ParsedMusicTag = {
+  tag: string;
+  state: GameActiveState;
+  genre: MusicGenre;
+  intensity: MusicIntensity;
+  keywords: string[];
+};
+
+const GAME_STATES = new Set<GameActiveState>(["exploration", "dialogue", "combat", "travel_rest"]);
+const MUSIC_GENRE_SET = new Set<string>(MUSIC_GENRES);
+const MUSIC_INTENSITY_SET = new Set<string>(MUSIC_INTENSITIES);
+const LOCATION_KIND_SET = new Set<string>(LOCATION_KINDS);
+
+const INTENSITY_RANK: Record<MusicIntensity, number> = {
+  calm: 0,
+  tense: 1,
+  intense: 2,
+};
+
+const STATE_DEFAULT_INTENSITY: Record<GameActiveState, MusicIntensity> = {
+  exploration: "tense",
+  dialogue: "calm",
+  combat: "intense",
+  travel_rest: "calm",
+};
+
+const WEATHER_INTENSITY: Record<string, MusicIntensity> = {
+  storm: "intense",
+  stormy: "intense",
+  blizzard: "intense",
+  sandstorm: "intense",
+  fog: "tense",
+  foggy: "tense",
+  rain: "tense",
+  rainy: "tense",
+  heavy_rain: "tense",
+  frost: "tense",
+  snowy: "tense",
+};
+
+const TIME_INTENSITY: Record<string, MusicIntensity> = {
+  evening: "tense",
+  night: "tense",
+  midnight: "tense",
+};
+
+const WEATHER_KEYWORDS: Record<string, string[]> = {
+  clear: ["clear", "sun", "light", "warm"],
+  cloudy: ["cloud", "overcast"],
+  fog: ["fog", "mist"],
+  foggy: ["fog", "mist"],
+  rainy: ["rain", "storm"],
+  rain: ["rain", "storm"],
+  stormy: ["storm", "thunder"],
+  storm: ["storm", "thunder"],
+  snowy: ["snow", "frost", "ice"],
+  snow: ["snow", "frost", "ice"],
+  frost: ["snow", "frost", "ice"],
+  windy: ["wind"],
+  wind: ["wind"],
+};
+
+const TIME_KEYWORDS: Record<string, string[]> = {
+  dawn: ["dawn", "morning", "light"],
+  morning: ["morning", "light"],
+  noon: ["day", "light"],
+  afternoon: ["day", "light"],
+  evening: ["evening", "dusk"],
+  night: ["night", "dark"],
+  midnight: ["night", "midnight", "dark"],
+};
+
 // Weather → preferred ambient keywords
-// Keys must match WeatherType values from weather.service.ts
 const WEATHER_AMBIENT: Record<string, string[]> = {
   clear: ["birds", "wind", "water"],
   cloudy: ["wind"],
   overcast: ["wind", "eerie"],
   rain: ["rain", "thunder"],
+  rainy: ["rain", "thunder"],
   heavy_rain: ["rain", "thunder", "howling"],
   storm: ["rain", "thunder", "howling"],
+  stormy: ["rain", "thunder", "howling"],
   snow: ["wind", "howling"],
+  snowy: ["wind", "howling"],
   blizzard: ["wind", "howling"],
+  frost: ["wind", "howling"],
   fog: ["eerie", "wind"],
+  foggy: ["eerie", "wind"],
   wind: ["wind", "howling"],
+  windy: ["wind", "howling"],
   hail: ["rain", "wind"],
   sandstorm: ["wind", "howling"],
   heat_wave: ["birds"],
@@ -208,92 +168,300 @@ const STATE_AMBIENT: Record<GameActiveState, string[]> = {
   travel_rest: ["rain-on-roof", "river", "water", "birds"],
 };
 
+const LOCATION_AMBIENT: Record<LocationKind, string[]> = {
+  interior: ["interior", "rain-on-roof", "eerie", "dungeon", "murmur"],
+  exterior: ["nature", "wind", "birds", "water", "river"],
+  underground: ["dungeon", "cave", "eerie", "water", "drip"],
+  urban: ["urban", "crowd", "murmur", "commotion"],
+  nature: ["nature", "birds", "wind", "water", "river", "crickets"],
+};
+
+function pickRandom<T>(items: readonly T[]): T {
+  return items[Math.floor(Math.random() * items.length)]!;
+}
+
+function normalizeToken(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return normalized && normalized !== "null" ? normalized : null;
+}
+
+export function normalizeMusicGenre(value: unknown): MusicGenre | null {
+  const normalized = normalizeToken(value);
+  if (!normalized) return null;
+
+  const aliases: Record<string, MusicGenre> = {
+    sci_fi: "scifi",
+    science_fiction: "scifi",
+    slice: "slice_of_life",
+    slice_of_life: "slice_of_life",
+    sliceoflife: "slice_of_life",
+    everyday: "slice_of_life",
+    cozy: "slice_of_life",
+  };
+
+  if (aliases[normalized]) return aliases[normalized];
+  return MUSIC_GENRE_SET.has(normalized) ? (normalized as MusicGenre) : null;
+}
+
+export function normalizeMusicIntensity(value: unknown): MusicIntensity | null {
+  const normalized = normalizeToken(value);
+  if (!normalized) return null;
+
+  const aliases: Record<string, MusicIntensity> = {
+    low: "calm",
+    soft: "calm",
+    peaceful: "calm",
+    rest: "calm",
+    medium: "tense",
+    suspense: "tense",
+    suspenseful: "tense",
+    dramatic: "tense",
+    high: "intense",
+    action: "intense",
+    climax: "intense",
+    combat: "intense",
+    urgent: "intense",
+  };
+
+  if (aliases[normalized]) return aliases[normalized];
+  return MUSIC_INTENSITY_SET.has(normalized) ? (normalized as MusicIntensity) : null;
+}
+
+export function normalizeLocationKind(value: unknown): LocationKind | null {
+  const normalized = normalizeToken(value);
+  if (!normalized) return null;
+
+  const aliases: Record<string, LocationKind> = {
+    indoors: "interior",
+    inside: "interior",
+    room: "interior",
+    dungeon: "underground",
+    cave: "underground",
+    city: "urban",
+    town: "urban",
+    street: "urban",
+    outdoors: "exterior",
+    outside: "exterior",
+    wilderness: "nature",
+    forest: "nature",
+  };
+
+  if (aliases[normalized]) return aliases[normalized];
+  return LOCATION_KIND_SET.has(normalized) ? (normalized as LocationKind) : null;
+}
+
+function parseMusicTag(tag: string): ParsedMusicTag | null {
+  const parts = tag.split(":");
+  if (parts.length < 5 || parts[0] !== "music") return null;
+
+  const state = parts[1] as GameActiveState | undefined;
+  if (!state || !GAME_STATES.has(state)) return null;
+
+  const genre = normalizeMusicGenre(parts[2]);
+  const intensity = normalizeMusicIntensity(parts[3]);
+  if (!genre || !intensity) return null;
+
+  const keywords = parts
+    .slice(2)
+    .join(":")
+    .toLowerCase()
+    .split(/[:\-_]+/)
+    .filter((part) => part.length > 1);
+
+  return { tag, state, genre, intensity, keywords };
+}
+
+function inferMusicIntensity(
+  state: GameActiveState,
+  weather?: string | null,
+  timeOfDay?: string | null,
+): MusicIntensity {
+  const weatherIntensity = weather ? WEATHER_INTENSITY[weather.toLowerCase()] : null;
+  if (weatherIntensity && INTENSITY_RANK[weatherIntensity] > INTENSITY_RANK[STATE_DEFAULT_INTENSITY[state]]) {
+    return weatherIntensity;
+  }
+
+  const timeIntensity = timeOfDay ? TIME_INTENSITY[timeOfDay.toLowerCase()] : null;
+  if (timeIntensity && INTENSITY_RANK[timeIntensity] > INTENSITY_RANK[STATE_DEFAULT_INTENSITY[state]]) {
+    return timeIntensity;
+  }
+
+  return STATE_DEFAULT_INTENSITY[state];
+}
+
+function musicAccentScore(candidate: ParsedMusicTag, weather?: string | null, timeOfDay?: string | null): number {
+  const keywords = new Set<string>();
+  for (const keyword of weather ? (WEATHER_KEYWORDS[weather.toLowerCase()] ?? []) : []) {
+    keywords.add(keyword);
+  }
+  for (const keyword of timeOfDay ? (TIME_KEYWORDS[timeOfDay.toLowerCase()] ?? []) : []) {
+    keywords.add(keyword);
+  }
+  if (!keywords.size) return 0;
+
+  let score = 0;
+  for (const keyword of keywords) {
+    if (candidate.keywords.some((part) => part.includes(keyword) || keyword.includes(part))) score += 1;
+  }
+  return Math.min(score, 2);
+}
+
+function scoreStructuredMusic(
+  candidate: ParsedMusicTag,
+  desiredGenre: MusicGenre | null,
+  desiredIntensity: MusicIntensity,
+  hasExactGenre: boolean,
+  weather?: string | null,
+  timeOfDay?: string | null,
+): number {
+  let score = 10;
+
+  if (desiredGenre) {
+    if (candidate.genre === desiredGenre) {
+      score += 12;
+    } else if (candidate.genre === "custom") {
+      score += 2;
+    } else if (hasExactGenre) {
+      score -= 4;
+    }
+  }
+
+  const distance = Math.abs(INTENSITY_RANK[candidate.intensity] - INTENSITY_RANK[desiredIntensity]);
+  score += distance === 0 ? 8 : distance === 1 ? 3 : -4;
+  score += musicAccentScore(candidate, weather, timeOfDay);
+
+  return score;
+}
+
+/**
+ * Pick the best music tag for the current game context.
+ * Returns `null` when the current music is already appropriate or no structured music exists for this state.
+ */
+export function scoreMusic(input: MusicScoreInput): string | null {
+  const { state, weather, timeOfDay, currentMusic, recentMusic, availableMusic } = input;
+  if (!availableMusic.length) return null;
+
+  const desiredGenre = normalizeMusicGenre(input.musicGenre);
+  const desiredIntensity =
+    normalizeMusicIntensity(input.musicIntensity) ?? inferMusicIntensity(state, weather, timeOfDay);
+
+  const candidates = availableMusic
+    .map((tag) => parseMusicTag(tag))
+    .filter((candidate): candidate is ParsedMusicTag => !!candidate && candidate.state === state);
+  if (!candidates.length) return null;
+
+  const hasExactGenre = desiredGenre ? candidates.some((candidate) => candidate.genre === desiredGenre) : false;
+  const scored = candidates.map((candidate) => ({
+    tag: candidate.tag,
+    score: scoreStructuredMusic(candidate, desiredGenre, desiredIntensity, hasExactGenre, weather, timeOfDay),
+  }));
+
+  const bestScore = Math.max(...scored.map((entry) => entry.score));
+  const currentScore = currentMusic ? scored.find((entry) => entry.tag === currentMusic)?.score : undefined;
+  if (currentScore !== undefined && currentScore >= bestScore - 1) return null;
+
+  const recentSet = new Set((recentMusic ?? []).filter((tag) => tag && tag !== currentMusic));
+  const nonCurrent = scored.filter((entry) => entry.tag !== currentMusic);
+  const nonRecent = nonCurrent.filter((entry) => !recentSet.has(entry.tag));
+  const poolBase = nonRecent.length > 0 ? nonRecent : nonCurrent.length > 0 ? nonCurrent : scored;
+  if (!poolBase.length) return null;
+
+  const poolBestScore = Math.max(...poolBase.map((entry) => entry.score));
+  const selectionPool = poolBase.filter((entry) => entry.score >= poolBestScore - 1);
+  return pickRandom(selectionPool).tag;
+}
+
+function inferLocationKindFromBackground(background?: string | null): LocationKind | null {
+  const bgLower = (background ?? "").toLowerCase();
+  if (!bgLower) return null;
+  if (/(underground|dungeon|cave|catacomb|crypt|sewer|ruin)/.test(bgLower)) return "underground";
+  if (/(city|street|market|town|village|alley|plaza|urban)/.test(bgLower)) return "urban";
+  if (/(forest|woods|river|lake|mountain|beach|desert|valley|field|nature|swamp)/.test(bgLower)) return "nature";
+  if (/(interior|room|laboratory|mansion|house|tavern|palace|hallway|bedroom|classroom|library)/.test(bgLower)) {
+    return "interior";
+  }
+  return "exterior";
+}
+
+function ambientKeywordScore(parts: string[], keywords: string[]): number {
+  let score = 0;
+  for (const kw of keywords) {
+    if (parts.some((part) => part.includes(kw) || kw.includes(part))) score++;
+  }
+  return score;
+}
+
+function ambientLocationScore(parts: string[], locationKind: LocationKind | null): number {
+  if (!locationKind) return 0;
+  const subcategory = parts[1] ?? "";
+
+  if (locationKind === "interior") {
+    if (subcategory === "interior" || parts.includes("interior")) return 4;
+    if (subcategory === "nature" || subcategory === "urban") return -2;
+  }
+
+  if (locationKind === "underground") {
+    if (parts.some((part) => ["dungeon", "cave", "underground"].includes(part))) return 4;
+    if (subcategory === "interior") return 2;
+    if (subcategory === "nature") return -1;
+  }
+
+  if (locationKind === "urban") {
+    if (subcategory === "urban" || parts.includes("urban") || parts.includes("crowd")) return 4;
+    if (subcategory === "nature") return -2;
+  }
+
+  if (locationKind === "nature" || locationKind === "exterior") {
+    if (subcategory === "nature" || parts.includes("nature")) return 4;
+    if (subcategory === "interior") return -2;
+  }
+
+  return 0;
+}
+
 /**
  * Pick the best ambient tag for the current game context.
  * Returns `null` when the current ambient is already appropriate or no match found.
  */
 export function scoreAmbient(input: AmbientScoreInput): string | null {
   const { state, weather, timeOfDay, currentAmbient, availableAmbient, background } = input;
-
   if (!availableAmbient.length) return null;
 
-  // Detect interior from background tag
-  const bgLower = (background ?? "").toLowerCase();
-  const isInterior =
-    bgLower.includes("interior") ||
-    bgLower.includes("room") ||
-    bgLower.includes("laboratory") ||
-    bgLower.includes("mansion") ||
-    bgLower.includes("house") ||
-    bgLower.includes("tavern") ||
-    bgLower.includes("palace") ||
-    bgLower.includes("hallway") ||
-    bgLower.includes("bedroom") ||
-    bgLower.includes("classroom") ||
-    bgLower.includes("library");
-
-  // Build desired keywords
+  const locationKind = normalizeLocationKind(input.locationKind) ?? inferLocationKindFromBackground(background);
   const keywords: string[] = [];
-  if (isInterior) {
-    keywords.push("interior", "rain-on-roof", "eerie", "dungeon");
+  if (locationKind) {
+    keywords.push(...LOCATION_AMBIENT[locationKind]);
   } else {
     keywords.push(...(STATE_AMBIENT[state] ?? []));
   }
-  if (weather && WEATHER_AMBIENT[weather]) {
-    keywords.push(...WEATHER_AMBIENT[weather]);
-  }
-  if (timeOfDay && TIME_AMBIENT[timeOfDay]) {
-    keywords.push(...TIME_AMBIENT[timeOfDay]);
-  }
+  keywords.push(...(STATE_AMBIENT[state] ?? []));
+  if (weather) keywords.push(...(WEATHER_AMBIENT[weather.toLowerCase()] ?? []));
+  if (timeOfDay) keywords.push(...(TIME_AMBIENT[timeOfDay.toLowerCase()] ?? []));
 
-  // Score each candidate
   const scored = availableAmbient.map((tag) => {
     const parts = tag
       .toLowerCase()
       .split(/[:\-_]+/)
-      .filter((p) => p.length > 1);
-    let score = 0;
-    // Interior tag bonus / penalty
-    const tagIsInterior = parts.includes("interior");
-    if (isInterior && tagIsInterior) score += 2;
-    if (!isInterior && tagIsInterior) score -= 2;
-    // Keyword matching
-    for (const kw of keywords) {
-      if (parts.some((p) => p.includes(kw) || kw.includes(p))) {
-        score++;
-      }
-    }
+      .filter((part) => part.length > 1);
+    const score = ambientLocationScore(parts, locationKind) + ambientKeywordScore(parts, keywords);
     return { tag, score };
   });
 
-  // Shuffle first for stable tie-breaking, then sort by score descending
   for (let i = scored.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [scored[i], scored[j]] = [scored[j]!, scored[i]!];
   }
   scored.sort((a, b) => b.score - a.score);
 
-  const best = scored[0]!;
-  if (best.score <= 0) return null; // no good match
+  const best = scored[0];
+  if (!best || best.score <= 0) return null;
 
-  if (best.tag === currentAmbient) {
-    const alt = scored.find((s) => s.score === best.score && s.tag !== currentAmbient);
-    return alt ? alt.tag : null;
-  }
-
-  if (currentAmbient && availableAmbient.includes(currentAmbient)) {
-    const currentParts = currentAmbient
-      .toLowerCase()
-      .split(/[:\-_]+/)
-      .filter((p) => p.length > 1);
-    let currentScore = 0;
-    if (isInterior && currentParts.includes("interior")) currentScore += 2;
-    if (!isInterior && currentParts.includes("interior")) currentScore -= 2;
-    for (const kw of keywords) {
-      if (currentParts.some((p) => p.includes(kw) || kw.includes(p))) currentScore++;
-    }
-    if (currentScore >= best.score) return null;
-  }
+  const current = currentAmbient ? scored.find((entry) => entry.tag === currentAmbient) : undefined;
+  if (current && current.score >= best.score) return null;
 
   return best.tag;
 }

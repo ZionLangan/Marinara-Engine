@@ -10,6 +10,8 @@ interface ChatBranchSelectorProps {
   activeChatName?: string | null;
   groupId?: string | null;
   variant?: "conversation" | "roleplay";
+  compact?: boolean;
+  className?: string;
 }
 
 export function ChatBranchSelector({
@@ -17,6 +19,8 @@ export function ChatBranchSelector({
   activeChatName,
   groupId,
   variant = "conversation",
+  compact = false,
+  className,
 }: ChatBranchSelectorProps) {
   const { data: groupChats, isLoading } = useChatGroup(groupId ?? null);
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
@@ -100,25 +104,45 @@ export function ChatBranchSelector({
       <button
         ref={buttonRef}
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={(event) => {
+          if (compact) event.stopPropagation();
+          setOpen((value) => !value);
+        }}
         className={cn(
-          "flex max-w-[min(15rem,calc(100vw-9rem))] items-center gap-2 rounded-lg px-2.5 py-1.5 text-left backdrop-blur-sm transition-colors",
+          compact
+            ? "relative flex h-8 w-8 items-center justify-center rounded-lg backdrop-blur-sm transition-colors"
+            : "flex max-w-[min(15rem,calc(100vw-9rem))] items-center gap-2 rounded-lg px-2.5 py-1.5 text-left backdrop-blur-sm transition-colors",
           buttonClassName,
+          className,
         )}
         title="Switch branch"
       >
         <GitBranch size="0.8125rem" className="shrink-0" />
-        <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium">{branchLabel}</span>
-        <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium", badgeClassName)}>
-          {isLoading ? <Loader2 size="0.6875rem" className="animate-spin" /> : branches.length}
-        </span>
-        <ChevronDown size="0.75rem" className={cn("shrink-0 transition-transform", open && "rotate-180")} />
+        {compact ? (
+          <span
+            className={cn(
+              "absolute -right-1 -top-1 flex min-w-4 justify-center rounded-full px-1 text-[0.5625rem] font-semibold leading-4",
+              badgeClassName,
+            )}
+          >
+            {isLoading ? <Loader2 size="0.5625rem" className="mt-0.5 animate-spin" /> : branches.length}
+          </span>
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium">{branchLabel}</span>
+            <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[0.625rem] font-medium", badgeClassName)}>
+              {isLoading ? <Loader2 size="0.6875rem" className="animate-spin" /> : branches.length}
+            </span>
+            <ChevronDown size="0.75rem" className={cn("shrink-0 transition-transform", open && "rotate-180")} />
+          </>
+        )}
       </button>
 
       {open &&
         createPortal(
           <div
             ref={popoverRef}
+            data-chat-branch-popover
             className="fixed z-[9999] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/40"
             style={{ top: position.top, left: position.left, width: position.width }}
           >

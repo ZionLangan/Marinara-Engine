@@ -2,33 +2,80 @@
 // Generic API client for communicating with the backend
 // ──────────────────────────────────────────────
 
+import { CSRF_HEADER, CSRF_HEADER_VALUE } from "@marinara-engine/shared";
+
 const BASE = "/api";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+export const ADMIN_SECRET_STORAGE_KEY = "marinara_admin_secret";
+
+export function getAdminSecretHeader(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const secret = window.localStorage.getItem(ADMIN_SECRET_STORAGE_KEY)?.trim();
+  return secret ? { "X-Admin-Secret": secret } : {};
+}
 
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public payload?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
-  // Only set Content-Type for requests that have a body
-  if (init?.body !== undefined) {
-    headers["Content-Type"] = "application/json";
+export type JsonRepairKind = "game_setup" | "session_conclusion" | "campaign_progression";
+
+export type JsonRepairRequest = {
+  kind: JsonRepairKind;
+  title: string;
+  rawJson: string;
+  applyEndpoint: string;
+  applyBody?: Record<string, unknown>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+export function getJsonRepairRequest(error: unknown): JsonRepairRequest | null {
+  if (!(error instanceof ApiError) || !isRecord(error.payload)) return null;
+  const repair = error.payload.jsonRepair;
+  if (!isRecord(repair)) return null;
+
+  const kind = repair.kind;
+  const title = repair.title;
+  const rawJson = repair.rawJson;
+  const applyEndpoint = repair.applyEndpoint;
+  if (
+    (kind !== "game_setup" && kind !== "session_conclusion" && kind !== "campaign_progression") ||
+    typeof title !== "string" ||
+    typeof rawJson !== "string" ||
+    typeof applyEndpoint !== "string"
+  ) {
+    return null;
   }
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
+
+  return {
+    kind,
+    title,
+    rawJson,
+    applyEndpoint,
+    applyBody: isRecord(repair.applyBody) ? repair.applyBody : undefined,
+  };
+}
+
+export function isJsonRepairApiError(error: unknown): boolean {
+  return getJsonRepairRequest(error) !== null;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError(res.status, body.error ?? res.statusText);
+    throw new ApiError(res.status, body.error ?? res.statusText, body);
   }
 
   // 204 No Content
@@ -37,7 +84,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(getAdminSecretHeader())) {
+    headers.set(name, value);
+  }
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (UNSAFE_METHODS.has(method)) {
+    headers.set(CSRF_HEADER, CSRF_HEADER_VALUE);
+  }
+
+  // Only default string bodies to JSON; FormData/Blob/etc. need browser-managed headers.
+  if (typeof init?.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  return fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    cache: "no-store",
+  });
+}
+
 export const api = {
+  raw: (path: string, init?: RequestInit) => apiFetch(path, init),
+
   get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
 
   post: <T>(path: string, body?: unknown) =>
@@ -62,7 +133,7 @@ export const api = {
 
   /** Download a JSON endpoint as a file (triggers browser save-as). */
   download: async (path: string, fallbackFilename = "export.json") => {
-    const res = await fetch(`${BASE}${path}`);
+    const res = await fetch(`${BASE}${path}`, { headers: getAdminSecretHeader(), cache: "no-store" });
     if (!res.ok) throw new ApiError(res.status, "Download failed");
     const disposition = res.headers.get("Content-Disposition");
     let filename = fallbackFilename;
@@ -85,12 +156,13 @@ export const api = {
   downloadPost: async (path: string, body: unknown, fallbackFilename = "export.bin") => {
     const res = await fetch(`${BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...getAdminSecretHeader(), [CSRF_HEADER]: CSRF_HEADER_VALUE, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      cache: "no-store",
     });
     if (!res.ok) {
       const payload = await res.json().catch(() => ({ error: res.statusText }));
-      throw new ApiError(res.status, payload.error ?? "Download failed");
+      throw new ApiError(res.status, payload.error ?? "Download failed", payload);
     }
     const disposition = res.headers.get("Content-Disposition");
     let filename = fallbackFilename;
@@ -115,7 +187,7 @@ export const api = {
   stream: async function* (path: string, body?: unknown): AsyncGenerator<string> {
     const res = await fetch(`${BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...getAdminSecretHeader(), [CSRF_HEADER]: CSRF_HEADER_VALUE, "Content-Type": "application/json" },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       cache: "no-store",
     });
@@ -151,7 +223,7 @@ export const api = {
           try {
             const parsed = JSON.parse(data);
             if (parsed.type === "token" && parsed.data) yield parsed.data;
-            else if (parsed.type === "error") throw new ApiError(500, parsed.data ?? "Generation error");
+            else if (parsed.type === "error") throw new ApiError(500, parsed.data ?? "Generation error", parsed);
             else if (parsed.type === "done") return;
           } catch (e) {
             // If not JSON, yield as raw text
@@ -173,7 +245,7 @@ export const api = {
   ): AsyncGenerator<{ type: string; data: unknown }> {
     const res = await fetch(`${BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...getAdminSecretHeader(), [CSRF_HEADER]: CSRF_HEADER_VALUE, "Content-Type": "application/json" },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       cache: "no-store",
       signal,
@@ -224,12 +296,13 @@ export const api = {
   upload: async <T>(path: string, formData: FormData): Promise<T> => {
     const res = await fetch(`${BASE}${path}`, {
       method: "POST",
+      headers: { ...getAdminSecretHeader(), [CSRF_HEADER]: CSRF_HEADER_VALUE },
       body: formData,
     });
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw new ApiError(res.status, body.error ?? res.statusText);
+      throw new ApiError(res.status, body.error ?? res.statusText, body);
     }
 
     return res.json() as Promise<T>;

@@ -22,6 +22,7 @@ export * from "./types/theme.js";
 export * from "./types/chat-preset.js";
 export * from "./types/game.js";
 export * from "./types/sidecar.js";
+export * from "./types/image-generation-defaults.js";
 
 // Schemas
 export * from "./schemas/chat.schema.js";
@@ -42,8 +43,11 @@ export * from "./constants/defaults.js";
 export * from "./constants/chat-modes.js";
 export * from "./constants/model-lists.js"; // also exports IMAGE_GENERATION_SOURCES
 export * from "./constants/agent-prompts.js";
+export * from "./constants/image-generation-defaults.js";
+export * from "./constants/security.js";
 
 // Utils
 export * from "./utils/macro-engine.js";
 export * from "./utils/xml-wrapper.js";
 export * from "./utils/music-score.js";
+export * from "./utils/agent-cost.js";

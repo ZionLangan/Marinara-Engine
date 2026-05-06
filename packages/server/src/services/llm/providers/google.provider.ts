@@ -119,6 +119,8 @@ export class GoogleProvider extends BaseLLMProvider {
       };
     }
 
+    this.applyCustomParameters(body, options);
+
     const response = await llmFetch(url, {
       method: "POST",
       headers: {

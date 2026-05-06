@@ -8,6 +8,7 @@ type SceneInfo =
   | {
       variant: "origin";
       sceneChatId: string;
+      sceneChatName?: string;
     }
   | {
       variant: "scene";

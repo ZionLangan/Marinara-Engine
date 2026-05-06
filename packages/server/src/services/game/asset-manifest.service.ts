@@ -5,8 +5,9 @@
 // a tag → path manifest. Re-scans on demand or
 // after uploads.
 // ──────────────────────────────────────────────
-import { readdirSync, statSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { readdirSync, statSync, existsSync, mkdirSync, writeFileSync, readFileSync, renameSync } from "fs";
 import { join, extname, relative, basename } from "path";
+import { MUSIC_GENRES, MUSIC_INTENSITIES, type MusicGenre, type MusicIntensity } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 
 export const GAME_ASSETS_DIR = join(DATA_DIR, "game-assets");
@@ -24,7 +25,7 @@ const EXTENSIONS: Record<string, Set<string>> = {
 
 /** A single entry in the asset manifest. */
 export interface AssetEntry {
-  /** Tag for referencing in prompts, e.g. "music:combat:epic-battle" */
+  /** Tag for referencing in prompts, e.g. "music:combat:fantasy:intense:epic-battle" */
   tag: string;
   /** Category: music, sfx, sprites, backgrounds */
   category: string;
@@ -49,14 +50,96 @@ export interface AssetManifest {
   byCategory: Record<string, AssetEntry[]>;
 }
 
+const MUSIC_STATES = ["exploration", "dialogue", "combat", "travel_rest"] as const;
+const LEGACY_MUSIC_STATE_SET = new Set<string>(MUSIC_STATES);
+
+function inferLegacyMusicGenre(name: string, state: string): MusicGenre {
+  const lower = name.toLowerCase();
+  if (/(horror|dark|sinister|eerie|dread|nightmare|shadow|catastrophe|menace|hostility|desolate)/.test(lower)) {
+    return "horror";
+  }
+  if (/(mystery|secret|hidden|ancient|arcane|illusion|truth|crypt|forgotten|unknown)/.test(lower)) {
+    return "mystery";
+  }
+  if (/(romance|love|tender|sweet|adieu|lullaby|smile|felicitation|reverie|dreamy|devotion)/.test(lower)) {
+    return "romance";
+  }
+  if (/(clockwork|industry|gear|city|urban|fontaine)/.test(lower)) {
+    return "modern";
+  }
+  if (state === "dialogue" && /(town|cosy|peaceful|daily|summer|festival|chat|murmur)/.test(lower)) {
+    return "slice_of_life";
+  }
+  return "fantasy";
+}
+
+function inferLegacyMusicIntensity(name: string, state: string): MusicIntensity {
+  const lower = name.toLowerCase();
+  if (
+    state === "combat" ||
+    /(battle|boss|fury|rage|wrath|combat|conflict|confrontation|pursuit|danger|thunder|rapid|force|war|climax)/.test(
+      lower,
+    )
+  ) {
+    return "intense";
+  }
+  if (/(tense|dark|mist|unrest|sinister|secret|snow|forgotten|rain|storm|night|menace|ominous|hollow)/.test(lower)) {
+    return "tense";
+  }
+  return state === "exploration" ? "tense" : "calm";
+}
+
+function uniqueDestinationPath(destDir: string, filename: string): string {
+  const ext = extname(filename);
+  const base = basename(filename, ext);
+  let candidate = join(destDir, filename);
+  let suffix = 2;
+  while (existsSync(candidate)) {
+    candidate = join(destDir, `${base}-${suffix}${ext}`);
+    suffix++;
+  }
+  return candidate;
+}
+
+function migrateLegacyFlatMusicAssets(): void {
+  const musicDir = join(GAME_ASSETS_DIR, "music");
+  if (!existsSync(musicDir)) return;
+
+  for (const state of MUSIC_STATES) {
+    const stateDir = join(musicDir, state);
+    if (!existsSync(stateDir)) continue;
+
+    for (const entry of readdirSync(stateDir)) {
+      if (entry.startsWith(".")) continue;
+      const sourcePath = join(stateDir, entry);
+      const stat = statSync(sourcePath);
+      if (!stat.isFile()) continue;
+
+      const ext = extname(entry).toLowerCase();
+      if (!EXTENSIONS.music?.has(ext)) continue;
+      if (!LEGACY_MUSIC_STATE_SET.has(state)) continue;
+
+      const name = basename(entry, ext);
+      const genre = inferLegacyMusicGenre(name, state);
+      const intensity = inferLegacyMusicIntensity(name, state);
+      const destDir = join(stateDir, genre, intensity);
+      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+      renameSync(sourcePath, uniqueDestinationPath(destDir, entry));
+    }
+  }
+}
+
 /** Ensure the base game-assets directory structure exists. */
 export function ensureAssetDirs(): void {
+  const structuredMusicDirs = MUSIC_STATES.flatMap((state) =>
+    MUSIC_GENRES.flatMap((genre) =>
+      MUSIC_INTENSITIES.map((intensity) => join(GAME_ASSETS_DIR, "music", state, genre, intensity)),
+    ),
+  );
+
   const dirs = [
     GAME_ASSETS_DIR,
-    join(GAME_ASSETS_DIR, "music", "exploration"),
-    join(GAME_ASSETS_DIR, "music", "combat"),
-    join(GAME_ASSETS_DIR, "music", "dialogue"),
-    join(GAME_ASSETS_DIR, "music", "travel_rest"),
+    ...structuredMusicDirs,
     join(GAME_ASSETS_DIR, "sfx", "ui"),
     join(GAME_ASSETS_DIR, "sfx", "combat"),
     join(GAME_ASSETS_DIR, "sfx", "exploration"),
@@ -72,6 +155,7 @@ export function ensureAssetDirs(): void {
   for (const dir of dirs) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
+  migrateLegacyFlatMusicAssets();
 }
 
 /** Recursively scan a directory for files matching the given extensions. */
@@ -102,7 +186,7 @@ function scanDir(dir: string, allowedExts: Set<string>): Array<{ rel: string; na
 
 /**
  * Build a tag from a relative path.
- * e.g. "music/combat/epic-battle.mp3" → "music:combat:epic-battle"
+ * e.g. "music/combat/fantasy/intense/epic-battle.mp3" → "music:combat:fantasy:intense:epic-battle"
  */
 function pathToTag(rel: string): string {
   const withoutExt = rel.replace(/\.[^.]+$/, "");

@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   useCallback,
@@ -136,6 +137,12 @@ function isCombatResultMessage(message: NarrationMessage): boolean {
   return message.role === "user" && /\[combat_result\]/i.test(message.content || "");
 }
 
+const SYNTHETIC_GAME_START_MESSAGE_RE = /^\s*\[start(?:\s+the)?\s+game\]\s*$/i;
+
+function isSyntheticGameStartMessage(message: Pick<NarrationMessage, "role" | "content">): boolean {
+  return message.role === "user" && SYNTHETIC_GAME_START_MESSAGE_RE.test(message.content || "");
+}
+
 interface GameVoiceAudioJob {
   cacheKey: string;
   textCacheKey: string;
@@ -150,6 +157,8 @@ interface GameVoiceEntryPlan {
   audioJobs: GameVoiceAudioJob[];
   controller: AbortController;
 }
+
+const GAME_TTS_CHUNK_ATTEMPTS = 2;
 
 interface GameNarrationProps {
   messages: NarrationMessage[];
@@ -426,6 +435,53 @@ function buildGameVoiceAudioJobs(
   );
 }
 
+function waitForGameTTSRetry(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("TTS request aborted", "AbortError"));
+      return;
+    }
+    const timeout = window.setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timeout);
+        reject(new DOMException("TTS request aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
+async function generateGameVoiceJobBlob(job: GameVoiceAudioJob, controller: AbortController): Promise<Blob> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= GAME_TTS_CHUNK_ATTEMPTS; attempt += 1) {
+    if (controller.signal.aborted) throw new DOMException("TTS request aborted", "AbortError");
+    try {
+      return await getOrCreateCachedTTSAudioBlob(
+        job.cacheKey,
+        () =>
+          ttsService.generateAudio(job.chunk, {
+            speaker: job.speaker,
+            tone: job.tone,
+            voice: job.voice,
+            signal: controller.signal,
+          }),
+        [job.textCacheKey],
+      );
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+      lastError = err;
+      if (attempt < GAME_TTS_CHUNK_ATTEMPTS) {
+        await waitForGameTTSRetry(350 * attempt, controller.signal);
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("TTS request failed");
+}
+
 function findNpcVoiceHint(speaker: string | null | undefined, gameNpcs: GameNpc[]) {
   const normalizedSpeaker = speaker?.trim().toLowerCase();
   if (!normalizedSpeaker) return null;
@@ -633,6 +689,9 @@ export function GameNarration({
   const [visibleChars, setVisibleChars] = useState(0);
   const [logsOpen, setLogsOpen] = useState(false);
   const messagesPerPage = useUIStore((s) => s.messagesPerPage);
+  const gameDialogueDisplayMode = useUIStore((s) => s.gameDialogueDisplayMode);
+  const useStackedLogDisplay = gameDialogueDisplayMode === "stacked";
+  const showLogsButton = !useStackedLogDisplay;
   const [editingContent, setEditingContent] = useState<string | null>(null);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [editingLogSeg, setEditingLogSeg] = useState<{
@@ -646,6 +705,8 @@ export function GameNarration({
   const logEditTextareaRef = useRef<HTMLTextAreaElement>(null);
   const logEditDraftRef = useRef<{ content: string; speaker?: string }>({ content: "", speaker: undefined });
   const logScrolledRef = useRef(false);
+  const stackedLogRef = useRef<HTMLDivElement | null>(null);
+  const [stackedLogPinned, setStackedLogPinned] = useState(true);
   const segmentSourceMessageIdsRef = useRef<Array<string | null>>([]);
   const { data: ttsConfig } = useTTSConfig();
   const [gameVoiceVersion, setGameVoiceVersion] = useState(0);
@@ -794,6 +855,7 @@ export function GameNarration({
       if (msg.role === "system") continue;
       if (msg.role === "user") {
         if (!msg.content?.trim()) continue;
+        if (isSyntheticGameStartMessage(msg)) continue;
         const playerName = personaInfo?.name || "You";
         const color = personaInfo?.dialogueColor || personaInfo?.nameColor || "#a5b4fc";
         out.push({
@@ -873,6 +935,7 @@ export function GameNarration({
     for (let i = assistantIdx - 1; i >= 0; i--) {
       const msg = messages[i]!;
       if (isCombatResultMessage(msg)) continue;
+      if (isSyntheticGameStartMessage(msg)) continue;
       if (msg.role === "user") return msg;
       if (msg.role === "assistant" || msg.role === "narrator") break;
     }
@@ -1447,6 +1510,7 @@ export function GameNarration({
 
       // Include user messages as player dialogue in logs
       if (showUserMessages && msg.role === "user" && msg.content.trim()) {
+        if (isSyntheticGameStartMessage(msg)) continue;
         const playerName = personaInfo?.name || "You";
         const color = personaInfo?.dialogueColor || personaInfo?.nameColor || "#a5b4fc";
         entries.push({
@@ -1498,8 +1562,9 @@ export function GameNarration({
           }
         }
         // Find the active segment by ID in the unfiltered list so side/extra offsets don't skew the slice
-        const activeSegId = segments[activeIndex]?.id;
-        let readUpTo = allSegs.length; // fallback: show all
+        const activeSeg = segments[activeIndex];
+        const activeSegId = activeSeg?.id;
+        let readUpTo = activeSeg?.sourceRole === "user" ? 0 : allSegs.length; // fallback: show all unless active is player action
         if (activeSegId) {
           const idx = allSegs.findIndex((s) => s.id === activeSegId);
           if (idx >= 0) {
@@ -1681,6 +1746,61 @@ export function GameNarration({
   const showAllLogs = useCallback(() => {
     setVisibleLogCount(logEntries.length);
   }, [logEntries.length]);
+  const stackedLogEntries = useMemo(() => {
+    if (!useStackedLogDisplay) return [];
+
+    const activeCompanionSideLines = active ? (sideLineMap.get(activeIndex) ?? EMPTY_GAME_SIDE_LINES) : [];
+    const activeCompanionSignatures = new Set(
+      activeCompanionSideLines.map((line) => `${line.type}|${line.character}|${line.target ?? ""}|${line.content}`),
+    );
+    const activeSourceMessageId = active?.sourceMessageId ?? null;
+
+    return logEntries
+      .map((entry) => ({
+        ...entry,
+        segments: entry.segments.filter((seg) => {
+          if (seg.id === active?.id) return false;
+          const sameSource =
+            !activeSourceMessageId || !seg.sourceMessageId || seg.sourceMessageId === activeSourceMessageId;
+          if (
+            sameSource &&
+            seg.partyType &&
+            activeCompanionSignatures.has(
+              `${seg.partyType}|${seg.speaker ?? ""}|${seg.whisperTarget ?? ""}|${seg.content}`,
+            )
+          ) {
+            return false;
+          }
+          return true;
+        }),
+      }))
+      .filter((entry) => entry.segments.length > 0);
+  }, [active, activeIndex, logEntries, sideLineMap, useStackedLogDisplay]);
+  const stackedLogFingerprint = useMemo(
+    () =>
+      stackedLogEntries.map((entry) => `${entry.messageId}:${entry.segments.map((seg) => seg.id).join(",")}`).join("|"),
+    [stackedLogEntries],
+  );
+
+  useEffect(() => {
+    if (!useStackedLogDisplay || !logsOpen) return;
+    setLogsOpen(false);
+    setEditingLogSeg(null);
+    logScrolledRef.current = false;
+  }, [logsOpen, useStackedLogDisplay]);
+
+  useEffect(() => {
+    if (useStackedLogDisplay) setStackedLogPinned(true);
+  }, [useStackedLogDisplay]);
+
+  useEffect(() => {
+    if (!useStackedLogDisplay || !stackedLogPinned) return;
+    const el = stackedLogRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [stackedLogFingerprint, stackedLogPinned, useStackedLogDisplay]);
 
   // Report active speaker to parent for sprite viewport
   // Guard against infinite re-render: skip callback if the resolved speaker hasn't changed,
@@ -1813,8 +1933,9 @@ export function GameNarration({
     onSegmentChange?.(activeIndex);
   }, [activeIndex, messageOffset, onSegmentChange]);
 
-  // Notify parent when the active segment changes so segment-tied effects can fire
-  useEffect(() => {
+  // Notify parent before paint when the active segment changes so segment-tied
+  // directions can pause the typewriter before its first visible character.
+  useLayoutEffect(() => {
     if (!segmentEnterReady.current) return;
     if (!onSegmentEnter) return;
     const activeSegment = segments[activeIndex];
@@ -1889,31 +2010,24 @@ export function GameNarration({
         if (controller.signal.aborted) continue;
 
         const blobs: Blob[] = [];
-        for (const job of audioJobs) {
+        let failed = false;
+        for (const [jobIndex, job] of audioJobs.entries()) {
           if (controller.signal.aborted) break;
           try {
-            const blob = await getOrCreateCachedTTSAudioBlob(
-              job.cacheKey,
-              () =>
-                ttsService.generateAudio(job.chunk, {
-                  speaker: job.speaker,
-                  tone: job.tone,
-                  voice: job.voice,
-                  signal: controller.signal,
-                }),
-              [job.textCacheKey],
-            );
+            const blob = await generateGameVoiceJobBlob(job, controller);
             blobs.push(blob);
           } catch (err) {
             if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) break;
-            console.warn("[game-tts] Failed to generate voice line", err);
+            failed = true;
+            console.warn(`[game-tts] Failed to generate voice line chunk ${jobIndex + 1}/${audioJobs.length}`, err);
+            break;
           }
         }
 
         try {
           if (controller.signal.aborted) return;
           const urls = blobs.map((blob) => URL.createObjectURL(blob));
-          if (urls.length > 0) {
+          if (!failed && urls.length === audioJobs.length) {
             gameVoiceCacheRef.current.set(key, {
               status: "ready",
               chunks: audioJobs.map((job) => job.chunk),
@@ -1923,6 +2037,7 @@ export function GameNarration({
               urls,
             });
           } else {
+            for (const url of urls) URL.revokeObjectURL(url);
             gameVoiceCacheRef.current.set(key, {
               status: "error",
               chunks: audioJobs.map((job) => job.chunk),
@@ -2301,7 +2416,6 @@ export function GameNarration({
     "flex items-center gap-1.5 rounded-lg bg-[var(--muted)]/30 px-3 py-1.5 text-xs text-[var(--foreground)]/70 transition-colors hover:bg-[var(--muted)]/50 hover:text-[var(--foreground)] dark:bg-white/10 dark:text-white/70 dark:hover:bg-white/20 dark:hover:text-white";
   const NARRATION_META_BTN =
     "flex min-h-7 items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--muted)]/20 px-2.5 py-1 text-xs text-[var(--foreground)]/75 transition-colors hover:bg-[var(--muted)]/40 dark:border-white/10 dark:bg-white/5 dark:text-white/75 dark:hover:bg-white/10";
-  const NARRATION_ICON_META_BTN = cn(NARRATION_META_BTN, "min-w-7 justify-center px-2");
 
   const handleInterrupt = useCallback(() => {
     // Request only — the parent opens the confirmation modal. We don't pause
@@ -2363,7 +2477,7 @@ export function GameNarration({
   }, [active, autoPlay, interruptPending]);
 
   // Shared Next + auto-play control group used by dialogue, narration, and readable boxes.
-  // The red Interrupt button swaps to a yellow Resume button only AFTER the player
+  // The Interrupt button swaps to a yellow Resume button only AFTER the player
   // confirms in the modal (interruptCommitted). While the modal is still open we keep
   // the red button visible so it doesn't look like the interrupt already happened.
   // While reviewing the past (messageOffset > 0), interrupt controls are hidden and
@@ -2373,16 +2487,15 @@ export function GameNarration({
   const showNav = reviewingPast || (!narrationComplete && !isStreaming && !interruptPending);
   const navControls =
     !showInterruptControls && !showNav ? null : (
-      <div className="flex items-stretch gap-1">
+      <div className="flex h-8 items-stretch gap-1">
         {showInterruptControls && !interruptCommitted && (
           <button
             onClick={handleInterrupt}
-            className="flex items-center gap-1 self-stretch rounded-lg border border-red-500/40 bg-red-500/15 px-2 text-xs font-semibold text-red-200 transition-colors hover:bg-red-500/25 hover:text-red-50 sm:px-2.5 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-200 dark:hover:bg-red-500/25"
+            className="flex h-full w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--muted)]/20 text-[var(--foreground)]/75 transition-colors hover:bg-[var(--muted)]/40 hover:text-[var(--foreground)] dark:border-white/10 dark:bg-white/5 dark:text-white/75 dark:hover:bg-white/10 dark:hover:text-white"
             title="Pause the GM so you can write back. Nothing is committed until you send."
             aria-label="Interrupt"
           >
             <Square size={11} fill="currentColor" />
-            <span className="hidden sm:inline">Interrupt!</span>
           </button>
         )}
         {showInterruptControls && interruptCommitted && (
@@ -2434,11 +2547,189 @@ export function GameNarration({
       </div>
     );
 
+  const renderStackedLogSegment = (seg: NarrationSegment) => {
+    const partyBadge =
+      seg.partyType && seg.partyType !== "main" ? (
+        <span
+          className={cn(
+            "ml-1.5 rounded-full px-1.5 py-0.5 text-[0.45rem] font-semibold uppercase tracking-wide",
+            seg.partyType === "side" && "bg-sky-500/15 text-sky-200/70",
+            seg.partyType === "extra" && "bg-sky-500/15 text-sky-200/70",
+            seg.partyType === "thought" && "bg-purple-500/15 text-purple-200/70",
+            seg.partyType === "whisper" && "bg-rose-500/15 text-rose-200/70",
+          )}
+        >
+          {PARTY_TYPE_ICONS[seg.partyType] ?? ""} {seg.partyType}
+          {seg.partyType === "whisper" && seg.whisperTarget && ` -> ${seg.whisperTarget}`}
+        </span>
+      ) : null;
+
+    const voiceKey = getVoiceKeyForSegment(seg);
+    const voiceEntry = voiceKey ? gameVoiceCacheRef.current.get(voiceKey) : undefined;
+    const voiceButton =
+      voiceKey && voiceEntry && voiceEntry.status !== "error" ? (
+        <button
+          type="button"
+          onClick={() => toggleGameVoiceKey(voiceKey)}
+          disabled={voiceEntry.status === "loading"}
+          className={cn(
+            "ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--foreground)]/45 transition-colors hover:bg-[var(--muted)]/40 hover:text-sky-200 disabled:cursor-wait disabled:opacity-60 dark:text-white/45 dark:hover:bg-white/10",
+            gameVoicePlayingKey === voiceKey && "bg-sky-400/15 text-sky-200 dark:text-sky-200",
+          )}
+          title={
+            voiceEntry.status === "loading"
+              ? "Generating voice-over"
+              : gameVoicePlayingKey === voiceKey
+                ? "Stop voice-over"
+                : "Play voice-over"
+          }
+        >
+          {voiceEntry.status === "loading" ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : gameVoicePlayingKey === voiceKey ? (
+            <VolumeX size={11} />
+          ) : (
+            <Volume2 size={11} />
+          )}
+        </button>
+      ) : null;
+
+    if (seg.type === "dialogue") {
+      const logAvatar = seg.speaker ? findNamedMapValue(speakerAvatarInfos, seg.speaker) : null;
+      return (
+        <div
+          key={seg.id}
+          className={cn(
+            "flex gap-2 rounded-lg border px-2.5 py-2",
+            seg.partyType === "thought"
+              ? "border-purple-400/10 bg-purple-950/15"
+              : seg.partyType === "whisper"
+                ? "border-rose-400/10 bg-rose-950/15"
+                : seg.partyType === "side" || seg.partyType === "extra"
+                  ? "border-sky-400/10 bg-sky-950/15"
+                  : "border-[var(--border)] bg-[var(--muted)]/20 dark:border-white/5 dark:bg-black/20",
+          )}
+        >
+          {logAvatar ? (
+            <CroppedAvatar
+              src={logAvatar.url}
+              alt={seg.speaker || ""}
+              crop={logAvatar.crop}
+              className="h-7 w-7 shrink-0 rounded-lg border border-[var(--border)] dark:border-white/10"
+            />
+          ) : (
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--accent)] text-[0.5rem] font-bold dark:border-white/10">
+              {(seg.speaker || "?")[0]}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center">
+              <span
+                className="min-w-0 truncate text-[0.6875rem] font-bold"
+                style={
+                  nameColorStyle(findNamedMapValue(speakerNameColors, seg.speaker ?? "") ?? seg.color) ?? {
+                    color: "rgb(186 230 253)",
+                  }
+                }
+              >
+                {seg.speaker || "Dialogue"}
+              </span>
+              {partyBadge}
+              {voiceButton}
+            </div>
+            <div
+              className={cn(
+                "mt-0.5 text-xs leading-relaxed text-[var(--foreground)]/80 dark:text-white/80",
+                seg.partyType === "thought" ? "italic opacity-80" : "font-semibold",
+              )}
+              style={seg.color ? { ...narrationFontStyle, color: seg.color } : narrationFontStyle}
+              dangerouslySetInnerHTML={{ __html: animateTextHtml(formatNarration(seg.content, false)) }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    if (seg.type === "system") {
+      return (
+        <div key={seg.id} className="rounded-lg border border-cyan-400/15 bg-cyan-950/15 px-2.5 py-2 text-cyan-50/80">
+          <div className="mb-1 text-[0.6rem] font-semibold uppercase tracking-wide text-cyan-200/80">System</div>
+          <div
+            className="whitespace-pre-wrap break-words text-xs leading-relaxed"
+            style={narrationFontStyle}
+            dangerouslySetInnerHTML={{ __html: animateTextHtml(formatNarration(seg.content, false)) }}
+          />
+        </div>
+      );
+    }
+
+    if (seg.type === "readable") {
+      return (
+        <div key={seg.id} className="rounded-lg border border-amber-400/15 bg-amber-950/15 px-2.5 py-2">
+          <div className="mb-1 text-[0.6rem] font-semibold uppercase tracking-wide text-amber-300/80">
+            {seg.readableType === "book" ? "Book" : "Note"}
+          </div>
+          <div
+            className="text-xs italic leading-relaxed text-amber-200/70"
+            style={narrationFontStyle}
+            dangerouslySetInnerHTML={{
+              __html: animateTextHtml(formatNarration(seg.readableContent ?? seg.content, false)),
+            }}
+          />
+        </div>
+      );
+    }
+
+    return (
+      <div
+        key={seg.id}
+        className="rounded-lg border border-[var(--border)] bg-[var(--muted)]/20 px-2.5 py-2 dark:border-white/5 dark:bg-black/20"
+      >
+        <div className="mb-1 flex items-center">
+          <span className="text-[0.6rem] font-semibold uppercase tracking-wide text-[var(--foreground)]/75 dark:text-white/80">
+            Narration
+          </span>
+          {voiceButton}
+        </div>
+        <div
+          className="text-xs leading-relaxed text-[var(--foreground)]/80 dark:text-white/80"
+          style={narrationStyle}
+          dangerouslySetInnerHTML={{ __html: animateTextHtml(formatNarration(seg.content, false)) }}
+        />
+      </div>
+    );
+  };
+
   return (
     <div className="relative flex min-h-0 flex-1 items-end px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-20 md:pt-24 sm:px-6 md:pb-4">
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-black/15 to-transparent" />
 
-      <div data-tour="game-dialogue" className="relative z-10 mx-auto w-full max-w-4xl">
+      <div
+        data-tour="game-dialogue"
+        className="relative z-10 mx-auto flex max-h-[calc(100svh-7rem)] min-h-0 w-full max-w-4xl flex-col md:max-h-[calc(100svh-8rem)]"
+      >
+        {useStackedLogDisplay && stackedLogEntries.length > 0 && (
+          <div
+            className="mb-2 rounded-2xl border border-[var(--border)] bg-[var(--card)]/70 p-2 shadow-[0_16px_38px_rgba(0,0,0,0.35)] backdrop-blur-md dark:border-white/10 dark:bg-black/40"
+            data-game-skip-bg-nav="true"
+          >
+            <div
+              ref={stackedLogRef}
+              className="flex max-h-[22svh] min-h-0 flex-col gap-1.5 overflow-y-auto pr-1 sm:max-h-[26svh] md:max-h-[32svh]"
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                setStackedLogPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 32);
+              }}
+            >
+              {stackedLogEntries.map((entry) => (
+                <div key={entry.messageId} className="space-y-1.5">
+                  {entry.segments.map((seg) => renderStackedLogSegment(seg))}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Side remarks — small floating box shown with the dialogue they follow */}
         {activeSideLines.length > 0 && doneTyping && (
           <div className="mb-2 flex w-full flex-col space-y-1.5">
@@ -2703,14 +2994,16 @@ export function GameNarration({
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setLogsOpen(true)}
-                    disabled={logEntries.length === 0}
-                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
-                  >
-                    <ScrollText size={12} />
-                    <span className="hidden sm:inline">Logs</span>
-                  </button>
+                  {showLogsButton && (
+                    <button
+                      onClick={() => setLogsOpen(true)}
+                      disabled={logEntries.length === 0}
+                      className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
+                    >
+                      <ScrollText size={12} />
+                      <span className="hidden sm:inline">Logs</span>
+                    </button>
+                  )}
                   {onOpenInventory && (
                     <button onClick={onOpenInventory} className={cn("relative", NARRATION_META_BTN)}>
                       <Package size={12} />
@@ -2799,14 +3092,16 @@ export function GameNarration({
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setLogsOpen(true)}
-                    disabled={logEntries.length === 0}
-                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
-                  >
-                    <ScrollText size={12} />
-                    <span className="hidden sm:inline">Logs</span>
-                  </button>
+                  {showLogsButton && (
+                    <button
+                      onClick={() => setLogsOpen(true)}
+                      disabled={logEntries.length === 0}
+                      className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
+                    >
+                      <ScrollText size={12} />
+                      <span className="hidden sm:inline">Logs</span>
+                    </button>
+                  )}
                   {onOpenInventory && (
                     <button onClick={onOpenInventory} className={cn("relative", NARRATION_META_BTN)}>
                       <Package size={12} />
@@ -2855,14 +3150,16 @@ export function GameNarration({
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => setLogsOpen(true)}
-                    disabled={logEntries.length === 0}
-                    className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
-                  >
-                    <ScrollText size={12} />
-                    <span className="hidden sm:inline">Logs</span>
-                  </button>
+                  {showLogsButton && (
+                    <button
+                      onClick={() => setLogsOpen(true)}
+                      disabled={logEntries.length === 0}
+                      className={cn(NARRATION_META_BTN, "disabled:opacity-40")}
+                    >
+                      <ScrollText size={12} />
+                      <span className="hidden sm:inline">Logs</span>
+                    </button>
+                  )}
                 </div>
                 {navControls}
               </div>
@@ -2885,7 +3182,7 @@ export function GameNarration({
           {/* Also show input when no narration at all (start of scene) */}
           {!scenePreparing && !active && !isStreaming && !sceneAnalysisFailed && inputSlot && (
             <div className="mt-2">
-              {logEntries.length > 0 && (
+              {showLogsButton && logEntries.length > 0 && (
                 <div className="mb-2">
                   <button
                     onClick={() => setLogsOpen(true)}
@@ -2901,7 +3198,7 @@ export function GameNarration({
           )}
 
           {isStreaming && (
-            <div className="mt-2 flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
+            <div className="mt-2 flex items-center gap-1 text-xs text-[var(--foreground)]/50">
               <span className="animate-pulse">●</span>
               <span>The Game Master is writing the next segment...</span>
             </div>
@@ -2910,7 +3207,7 @@ export function GameNarration({
       </div>
 
       {/* Logs modal */}
-      {logsOpen && (
+      {logsOpen && showLogsButton && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
           data-game-skip-bg-nav="true"
@@ -3507,12 +3804,7 @@ function PartyOverlayBox({
             )}
             style={(line.type === "side" || line.type === "extra") && color ? { color } : undefined}
             dangerouslySetInnerHTML={{
-              __html: formatNarration(
-                line.type === "side" || line.type === "extra" || line.type === "whisper"
-                  ? `"${line.content}"`
-                  : line.content,
-                false,
-              ),
+              __html: formatNarration(line.content, false),
             }}
           />
         </div>

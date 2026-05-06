@@ -17,12 +17,12 @@ pkg update && pkg install -y git nodejs-lts && git clone https://github.com/Past
 This one-liner:
 
 1. Updates Termux packages
-2. Installs Git and Node.js
+2. Installs Git and Node.js LTS. Marinara requires Node.js 24 LTS or newer.
 3. Clones the Marinara Engine repo
 4. Makes the launcher executable
 5. Runs the Termux launcher for the first time
 
-The Termux launcher downloads the prebuilt SQLite native module when available, installs dependencies, builds the app, and starts the server at `http://127.0.0.1:<PORT>` using the `PORT` value from `.env` or the default `7860`.
+The Termux launcher installs dependencies, builds the app, prepares local file-backed storage, and starts the server at `http://127.0.0.1:<PORT>` using the `PORT` value from `.env` or the default `7860`.
 
 > **Note:** The first run takes a few minutes because it builds the app on your device. Subsequent runs are much faster.
 

@@ -14,6 +14,8 @@ import {
 
 const BUILTIN_AGENT_ID_PREFIX = "builtin:";
 const BUILT_IN_AGENT_TYPES = new Set(BUILT_IN_AGENTS.map((agent) => agent.id));
+type AgentRunRow = typeof agentRuns.$inferSelect;
+type AgentConfigRow = typeof agentConfigs.$inferSelect;
 
 function isBuiltInAgentType(type: string): boolean {
   return BUILT_IN_AGENT_TYPES.has(type);
@@ -38,6 +40,32 @@ function keepLatestConfigPerType<T extends { type: string }>(rows: T[]): T[] {
     latestRows.push(row);
   }
   return latestRows;
+}
+
+function parseRunData(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function serializeRunWithConfig(row: { agent_runs: AgentRunRow; agent_configs: AgentConfigRow }) {
+  return {
+    id: row.agent_runs.id,
+    agentConfigId: row.agent_runs.agentConfigId,
+    agentType: row.agent_configs.type,
+    agentName: row.agent_configs.name,
+    chatId: row.agent_runs.chatId,
+    messageId: row.agent_runs.messageId,
+    resultType: row.agent_runs.resultType,
+    resultData: parseRunData(row.agent_runs.resultData),
+    tokensUsed: row.agent_runs.tokensUsed,
+    durationMs: row.agent_runs.durationMs,
+    success: row.agent_runs.success === "true",
+    error: row.agent_runs.error,
+    createdAt: row.agent_runs.createdAt,
+  };
 }
 
 export function createAgentsStorage(db: DB) {
@@ -141,6 +169,8 @@ export function createAgentsStorage(db: DB) {
       const id = newId();
       const timestamp = now();
       const type = builtInType ? input.type : await getUniqueCustomType(input.type, id);
+      const settings = { ...(input.settings ?? {}) };
+      if (input.resultType) settings.resultType = input.resultType;
       await db.insert(agentConfigs).values({
         id,
         type,
@@ -150,7 +180,7 @@ export function createAgentsStorage(db: DB) {
         enabled: String(input.enabled ?? true),
         connectionId: input.connectionId ?? null,
         promptTemplate: input.promptTemplate ?? "",
-        settings: JSON.stringify(input.settings ?? {}),
+        settings: JSON.stringify(settings),
         createdAt: timestamp,
         updatedAt: timestamp,
       });
@@ -165,7 +195,17 @@ export function createAgentsStorage(db: DB) {
       if (data.enabled !== undefined) updateFields.enabled = String(data.enabled);
       if (data.connectionId !== undefined) updateFields.connectionId = data.connectionId;
       if (data.promptTemplate !== undefined) updateFields.promptTemplate = data.promptTemplate;
-      if (data.settings !== undefined) updateFields.settings = JSON.stringify(data.settings);
+      if (data.settings !== undefined || data.resultType !== undefined) {
+        if (data.settings !== undefined) {
+          const settings = { ...data.settings };
+          if (data.resultType !== undefined) settings.resultType = data.resultType;
+          updateFields.settings = JSON.stringify(settings);
+        } else {
+          const current = await getById(id);
+          const currentSettings = current?.settings ? JSON.parse(current.settings as string) : {};
+          updateFields.settings = JSON.stringify({ ...currentSettings, resultType: data.resultType });
+        }
+      }
       await db.update(agentConfigs).set(updateFields).where(eq(agentConfigs.id, id));
       return this.getById(id);
     },
@@ -209,6 +249,18 @@ export function createAgentsStorage(db: DB) {
       return rows[0]?.agent_runs ?? null;
     },
 
+    /** Get the most recent run of an agent type in a given chat, regardless of success. */
+    async getLastRunByType(agentType: string, chatId: string) {
+      const rows = await db
+        .select()
+        .from(agentRuns)
+        .innerJoin(agentConfigs, eq(agentRuns.agentConfigId, agentConfigs.id))
+        .where(and(eq(agentConfigs.type, agentType), eq(agentRuns.chatId, chatId)))
+        .orderBy(desc(agentRuns.createdAt))
+        .limit(1);
+      return rows[0]?.agent_runs ?? null;
+    },
+
     /** Get all echo chamber messages for a chat, ordered by creation time. */
     async getEchoMessages(chatId: string) {
       const rows = await db
@@ -235,6 +287,42 @@ export function createAgentsStorage(db: DB) {
         }
       }
       return messages;
+    },
+
+    /** Get recent custom-agent runs for a chat, newest first. */
+    async listCustomRunsForChat(chatId: string, limit = 50) {
+      const normalizedLimit = Math.max(1, Math.min(limit, 200));
+      const rows = await db
+        .select()
+        .from(agentRuns)
+        .innerJoin(agentConfigs, eq(agentRuns.agentConfigId, agentConfigs.id))
+        .where(and(eq(agentRuns.chatId, chatId), eq(agentRuns.success, "true")))
+        .orderBy(desc(agentRuns.createdAt))
+        .limit(200);
+
+      return rows
+        .filter((row) => !isBuiltInAgentType(row.agent_configs.type))
+        .slice(0, normalizedLimit)
+        .map((row) => serializeRunWithConfig(row));
+    },
+
+    async getRunWithConfig(id: string) {
+      const rows = await db
+        .select()
+        .from(agentRuns)
+        .innerJoin(agentConfigs, eq(agentRuns.agentConfigId, agentConfigs.id))
+        .where(eq(agentRuns.id, id))
+        .limit(1);
+      const row = rows[0];
+      return row ? serializeRunWithConfig(row) : null;
+    },
+
+    async updateRunResultData(id: string, resultData: unknown) {
+      await db
+        .update(agentRuns)
+        .set({ resultData: JSON.stringify(resultData) })
+        .where(eq(agentRuns.id, id));
+      return this.getRunWithConfig(id);
     },
 
     // ── Agent Memory (persistent KV per agent per chat) ──

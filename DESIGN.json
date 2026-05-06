@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-03T00:00:00.000Z",
+  "title": "Design System: Marinara Engine",
+  "extensions": {
+    "northStar": "The Velvet Game Console",
+    "overview": "Marinara Engine is a dark blush-violet story surface for AI conversation, roleplay, and game mode. It should feel immersive, pretty, playful, and capable, with compact tools that remain clear for nontechnical users.",
+    "colorMeta": {
+      "void-night": {
+        "role": "neutral",
+        "displayName": "Void Night",
+        "canonical": "#050312",
+        "tonalRamp": ["#050312", "#08061a", "#141414d9"]
+      },
+      "blush-primary": {
+        "role": "primary",
+        "displayName": "Blush Primary",
+        "canonical": "#ffb3d9",
+        "tonalRamp": ["#e0709a", "#ffb3d9", "#ffd1e3"]
+      },
+      "muted-orchid": {
+        "role": "secondary",
+        "displayName": "Muted Orchid",
+        "canonical": "#d4adfc",
+        "tonalRamp": ["#7a64a0", "#d4adfc", "#e8d4ff"]
+      }
+    },
+    "elevation": {
+      "glassStrong": "0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px rgba(255, 255, 255, 0.1)",
+      "controlLift": "0 2px 6px rgba(0, 0, 0, 0.2)",
+      "controlHoverLift": "0 3px 8px rgba(0, 0, 0, 0.3)",
+      "characterGlow": "0 0 12px rgba(255, 179, 217, 0.25), 0 4px 12px rgba(0, 0, 0, 0.15)"
+    },
+    "motion": {
+      "fast": "150ms ease-out",
+      "standard": "200ms ease-out",
+      "expressive": "300ms cubic-bezier(0.16, 1, 0.3, 1)"
+    },
+    "rules": {
+      "do": [
+        "Use semantic tokens before adding one-off colors.",
+        "Keep mobile controls touch-friendly and readable.",
+        "Pair color with labels, icons, shape, or state text for color-blind support.",
+        "Use solid or near-solid surfaces for long text and editors."
+      ],
+      "dont": [
+        "Do not make Marinara a sterile SaaS dashboard.",
+        "Do not clone SillyTavern as the default identity.",
+        "Do not rely on hover for important mobile actions.",
+        "Do not use nested cards, side-stripe borders, or glassmorphism as the default layout answer."
+      ]
+    },
+    "components": {
+      "buttonPrimary": {
+        "html": "<button class=\"os-button-pastel\">Generate</button>",
+        "css": ".os-button-pastel { background: var(--primary); color: var(--primary-foreground); border-radius: 0.375rem; padding: 8px 20px; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,.2); }"
+      },
+      "glassPanel": {
+        "html": "<section class=\"glass-strong\">Panel content</section>",
+        "css": ".glass-strong { backdrop-filter: blur(32px) saturate(200%); background: var(--glass-strong-bg); border: 1px solid var(--glass-strong-border); box-shadow: var(--glass-strong-shadow); }"
+      }
+    }
+  }
+}

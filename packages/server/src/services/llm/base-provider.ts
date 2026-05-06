@@ -1,8 +1,9 @@
 // ──────────────────────────────────────────────
 // LLM Provider — Abstract Base
 // ──────────────────────────────────────────────
-import { Agent } from "undici";
 import { logger } from "../../lib/logger.js";
+import { isProviderLocalUrlsEnabled } from "../../config/runtime-config.js";
+import { safeFetch } from "../../utils/security.js";
 
 /**
  * Shared undici Agent with a 5-minute headers timeout (time to first byte)
@@ -10,14 +11,20 @@ import { logger } from "../../lib/logger.js";
  * long-running streaming responses to complete.
  */
 const LLM_HEADERS_TIMEOUT = 5 * 60 * 1000; // 5 minutes
-const llmDispatcher = new Agent({ bodyTimeout: 0, headersTimeout: LLM_HEADERS_TIMEOUT });
+const llmAgentOptions = { bodyTimeout: 0, headersTimeout: LLM_HEADERS_TIMEOUT };
 
 /**
  * Drop-in replacement for `fetch()` that uses a custom undici dispatcher
  * with no body/headers timeout. Use this for all outgoing LLM requests.
  */
 export function llmFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, dispatcher: llmDispatcher } as unknown as RequestInit);
+  return safeFetch(url, {
+    ...(init ?? {}),
+    agentOptions: llmAgentOptions,
+    policy: { allowLocal: isProviderLocalUrlsEnabled(), allowLoopback: true, allowedProtocols: ["https:", "http:"] },
+    maxResponseBytes: 50 * 1024 * 1024,
+    bufferResponse: false,
+  });
 }
 
 export interface ChatMessage {
@@ -71,6 +78,8 @@ export interface ChatOptions {
   enableCaching?: boolean;
   /** Callback for streaming thinking/reasoning content */
   onThinking?: (chunk: string) => void;
+  /** Prefer provider APIs that expose reasoning summaries when available */
+  captureReasoning?: boolean;
   /** Callback for streaming text tokens as they arrive (used in tool path) */
   onToken?: (chunk: string) => void;
   /** Enable extended thinking (reasoning models) */
@@ -93,6 +102,8 @@ export interface ChatOptions {
   onChatCompletionsReasoning?: (metadata: Record<string, unknown>) => void;
   /** Force a specific response format (e.g. { type: "json_object" }) */
   responseFormat?: { type: string };
+  /** Raw provider request parameters merged into the outgoing request body. */
+  customParameters?: Record<string, unknown>;
 }
 
 /** Token usage statistics returned by the model */
@@ -142,6 +153,7 @@ const CONTEXT_SAFETY_MARGIN_TOKENS = 64;
 const CONTEXT_SAFETY_MARGIN_RATIO = 0.02;
 const MIN_INPUT_BUDGET_TOKENS = 128;
 const MIN_OUTPUT_BUDGET_TOKENS = 128;
+const OUTPUT_BUDGET_REDUCTION_HEADROOM_TOKENS = 64;
 const MIN_CONTENT_CHARS = 48;
 const TRUNCATION_MARKER = "\n\n[Truncated to fit context window]";
 
@@ -318,6 +330,17 @@ export function fitMessagesToContext(
       : Math.max(1, Math.min(requestedMaxTokens, Math.max(1, usableWindow - reservedInputFloor)));
   let inputBudget = Math.max(0, usableWindow - (maxTokens ?? 0));
 
+  if (estimatedTokensBefore > inputBudget && maxTokens !== undefined) {
+    const minimumOutputBudget = Math.min(MIN_OUTPUT_BUDGET_TOKENS, Math.max(1, usableWindow - 1));
+    const headroom = Math.min(OUTPUT_BUDGET_REDUCTION_HEADROOM_TOKENS, Math.max(0, usableWindow - 1));
+    const maxTokensThatFitPrompt = Math.max(1, usableWindow - estimatedTokensBefore - headroom);
+    const reducedMaxTokens = Math.max(minimumOutputBudget, Math.min(maxTokens, maxTokensThatFitPrompt));
+    if (reducedMaxTokens < maxTokens) {
+      maxTokens = reducedMaxTokens;
+      inputBudget = Math.max(0, usableWindow - maxTokens);
+    }
+  }
+
   if (estimatedTokensBefore <= inputBudget) {
     return {
       messages,
@@ -477,7 +500,7 @@ export abstract class BaseLLMProvider {
     return tokens;
   }
 
-  /** Returns the connection-level max tokens override, if set. */
+  /** Returns the connection-level max output tokens override, if set. */
   public get maxTokensOverrideValue(): number | null {
     return this.maxTokensOverride ?? null;
   }
@@ -500,6 +523,11 @@ export abstract class BaseLLMProvider {
 
   protected resolveOpenrouterProvider(openrouterProvider?: string | null): string | null | undefined {
     return openrouterProvider ?? this.defaultOpenrouterProvider;
+  }
+
+  protected applyCustomParameters(body: Record<string, unknown>, options: ChatOptions): void {
+    if (!options.customParameters || Object.keys(options.customParameters).length === 0) return;
+    deepMergeRequestBody(body, options.customParameters);
   }
 
   /**
@@ -542,7 +570,7 @@ export abstract class BaseLLMProvider {
       headers["HTTP-Referer"] = "https://github.com/Pasta-Devs/Marinara-Engine";
       headers["X-Title"] = "Marinara Engine";
     }
-    const res = await fetch(`${this.baseUrl}/embeddings`, {
+    const res = await llmFetch(`${this.baseUrl}/embeddings`, {
       method: "POST",
       headers,
       body: JSON.stringify({ input: texts, model }),
@@ -554,5 +582,21 @@ export abstract class BaseLLMProvider {
     }
     const json = (await res.json()) as { data: Array<{ embedding: number[] }> };
     return json.data.map((d) => d.embedding);
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeRequestBody(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const current = target[key];
+    if (isPlainRecord(current) && isPlainRecord(value)) {
+      deepMergeRequestBody(current, value);
+    } else {
+      target[key] = value;
+    }
   }
 }

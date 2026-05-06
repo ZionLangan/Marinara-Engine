@@ -2,7 +2,8 @@
 // Full-Page Preset Editor
 // Tabs: Overview · Sections · Parameters · Review
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useMemo, useRef, type FC } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type FC, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { showConfirmDialog } from "../../lib/app-dialogs";
@@ -23,7 +24,9 @@ import {
   useReorderVariables,
 } from "../../hooks/use-presets";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Save,
   Trash2,
   FileText,
@@ -103,6 +106,16 @@ const MARKER_LABELS: Record<MarkerType, string> = {
   dialogue_examples: "Dialogue Examples",
   agent_data: "Agent Data",
 };
+
+function reorderIdsByOffset(items: Array<{ id: string }>, index: number, offset: number): string[] | null {
+  const targetIndex = index + offset;
+  if (targetIndex < 0 || targetIndex >= items.length) return null;
+  const ids = items.map((item) => item.id);
+  const [moved] = ids.splice(index, 1);
+  if (!moved) return null;
+  ids.splice(targetIndex, 0, moved);
+  return ids;
+}
 
 // ═══════════════════════════════════════════════
 //  Main Editor
@@ -720,6 +733,12 @@ function SectionsTab({
     setDropIdx(null);
   };
 
+  const moveSectionByOffset = (idx: number, offset: number) => {
+    const sectionIds = reorderIdsByOffset(sections, idx, offset);
+    if (!sectionIds) return;
+    onReorderSections.mutate({ presetId, sectionIds });
+  };
+
   return (
     <>
       {/* ── Toolbar ── */}
@@ -921,14 +940,36 @@ function SectionsTab({
                   )}
                 >
                   {/* Section header */}
-                  <div className="flex items-center gap-2 px-3 py-2.5">
-                    <div
-                      className="cursor-grab shrink-0 rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-                      title="Drag to reorder"
-                      onMouseDown={() => setDragReady(idx)}
-                      onMouseUp={() => setDragReady(null)}
-                    >
-                      <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+                  <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <div
+                        className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
+                        title="Drag to reorder"
+                        onMouseDown={() => setDragReady(idx)}
+                        onMouseUp={() => setDragReady(null)}
+                      >
+                        <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => moveSectionByOffset(idx, -1)}
+                        disabled={idx === 0 || onReorderSections.isPending}
+                        className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+                        title="Move up"
+                        aria-label={`Move ${section.name} up`}
+                      >
+                        <ArrowUp size="0.75rem" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveSectionByOffset(idx, 1)}
+                        disabled={idx === sections.length - 1 || onReorderSections.isPending}
+                        className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+                        title="Move down"
+                        aria-label={`Move ${section.name} down`}
+                      >
+                        <ArrowDown size="0.75rem" />
+                      </button>
                     </div>
                     <button
                       onClick={() => toggleExpanded(section.id)}
@@ -958,7 +999,9 @@ function SectionsTab({
                         {group.name}
                       </span>
                     )}
-                    <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{role}</span>
+                    <span className="hidden shrink-0 text-[0.625rem] text-[var(--muted-foreground)] sm:inline">
+                      {role}
+                    </span>
 
                     <div className="flex shrink-0 items-center gap-0.5">
                       <button
@@ -1156,7 +1199,7 @@ function SectionsTab({
 
       {sections.length > 0 && (
         <p className="text-center text-[0.625rem] text-[var(--muted-foreground)]">
-          Drag sections to reorder · Click to expand · Sections are assembled top-to-bottom
+          Click to expand · Sections are assembled top-to-bottom
         </p>
       )}
 
@@ -1240,6 +1283,12 @@ function PresetVariablesEditor({
     setDropIdx(null);
   };
 
+  const moveVariableByOffset = (idx: number, offset: number) => {
+    const variableIds = reorderIdsByOffset(variables, idx, offset);
+    if (!variableIds) return;
+    onReorderVariables.mutate({ presetId, variableIds });
+  };
+
   return (
     <div className="mt-6 space-y-3">
       <div className="flex items-center justify-between">
@@ -1320,6 +1369,11 @@ function PresetVariablesEditor({
                     onDeleteVariable={onDeleteVariable}
                     onGripDown={() => setDragReady(idx)}
                     onGripUp={() => setDragReady(null)}
+                    onMoveUp={() => moveVariableByOffset(idx, -1)}
+                    onMoveDown={() => moveVariableByOffset(idx, 1)}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < variables.length - 1}
+                    isReordering={onReorderVariables.isPending}
                   />
                 </div>
                 {showDropAfter && <div className="mx-2 mt-1 h-0.5 rounded-full bg-amber-400" />}
@@ -1343,6 +1397,11 @@ function VariableCard({
   onDeleteVariable,
   onGripDown,
   onGripUp,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
+  isReordering,
 }: {
   presetId: string;
   variable: any;
@@ -1352,6 +1411,11 @@ function VariableCard({
   onDeleteVariable: any;
   onGripDown: () => void;
   onGripUp: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  isReordering: boolean;
 }) {
   // Parse options
   let opts: Array<{ id: string; label: string; value: string }> = [];
@@ -1381,14 +1445,36 @@ function VariableCard({
   return (
     <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 transition-all">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2.5">
-        <div
-          className="cursor-grab shrink-0 rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-          title="Drag to reorder"
-          onMouseDown={onGripDown}
-          onMouseUp={onGripUp}
-        >
-          <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <div
+            className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
+            title="Drag to reorder"
+            onMouseDown={onGripDown}
+            onMouseUp={onGripUp}
+          >
+            <GripVertical size="0.875rem" className="text-[var(--muted-foreground)]" />
+          </div>
+          <button
+            type="button"
+            onClick={onMoveUp}
+            disabled={!canMoveUp || isReordering}
+            className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+            title="Move up"
+            aria-label={`Move ${varName || "variable"} up`}
+          >
+            <ArrowUp size="0.75rem" />
+          </button>
+          <button
+            type="button"
+            onClick={onMoveDown}
+            disabled={!canMoveDown || isReordering}
+            className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+            title="Move down"
+            aria-label={`Move ${varName || "variable"} down`}
+          >
+            <ArrowDown size="0.75rem" />
+          </button>
         </div>
         <button onClick={onToggle} className="shrink-0 rounded p-0.5 hover:bg-[var(--accent)]">
           {isExpanded ? (
@@ -1409,7 +1495,7 @@ function VariableCard({
             {isRandomPick ? "random" : "multi"}
           </span>
         )}
-        <code className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{`{{${varName}}}`}</code>
+        <code className="hidden shrink-0 text-[0.625rem] text-[var(--muted-foreground)] sm:inline">{`{{${varName}}}`}</code>
         <button
           onClick={async () => {
             if (
@@ -1838,6 +1924,11 @@ function SectionContentTextarea({
 }
 
 // ── Expanded prompt editor modal ──
+function PresetModalPortal({ children }: { children: ReactNode }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(children, document.body);
+}
+
 function ExpandedEditorModal({
   title,
   value,
@@ -1903,47 +1994,49 @@ function ExpandedEditorModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
-      <div className="relative flex h-[80vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <h3 className="text-sm font-semibold">{title}</h3>
-          <button onClick={handleClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
-            <X size="1rem" />
-          </button>
-        </div>
-        {/* Editor */}
-        <div className="flex-1 overflow-hidden p-4">
-          <textarea
-            ref={textareaRef}
-            value={local}
-            onChange={handleChange}
-            onKeyDown={(e) =>
-              handleTextareaTab(e, local, (v) => {
-                setLocal(v);
-                if (timeoutRef.current) clearTimeout(timeoutRef.current);
-                timeoutRef.current = setTimeout(() => {
-                  onChange(v);
-                }, 600);
-              })
-            }
-            className="h-full w-full resize-none rounded-lg bg-[var(--secondary)] p-4 font-mono text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-            placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
-          />
-        </div>
-        {/* Footer */}
-        <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">Changes auto-save. Press Escape to close.</p>
-          <button
-            onClick={handleClose}
-            className="rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-1.5 text-xs font-medium text-white shadow-md hover:shadow-lg active:scale-[0.98]"
-          >
-            Done
-          </button>
+    <PresetModalPortal>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
+        <div className="relative flex h-[80vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <h3 className="text-sm font-semibold">{title}</h3>
+            <button onClick={handleClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
+              <X size="1rem" />
+            </button>
+          </div>
+          {/* Editor */}
+          <div className="flex-1 overflow-hidden p-4">
+            <textarea
+              ref={textareaRef}
+              value={local}
+              onChange={handleChange}
+              onKeyDown={(e) =>
+                handleTextareaTab(e, local, (v) => {
+                  setLocal(v);
+                  if (timeoutRef.current) clearTimeout(timeoutRef.current);
+                  timeoutRef.current = setTimeout(() => {
+                    onChange(v);
+                  }, 600);
+                })
+              }
+              className="h-full w-full resize-none rounded-lg bg-[var(--secondary)] p-4 font-mono text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
+            />
+          </div>
+          {/* Footer */}
+          <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">Changes auto-save. Press Escape to close.</p>
+            <button
+              onClick={handleClose}
+              className="rounded-xl bg-gradient-to-r from-purple-400 to-violet-500 px-4 py-1.5 text-xs font-medium text-white shadow-md hover:shadow-lg active:scale-[0.98]"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </PresetModalPortal>
   );
 }
 
@@ -1969,55 +2062,60 @@ function MacrosReferenceModal({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <div className="flex items-center gap-2">
-            <BookOpen size="1rem" className="text-purple-400" />
-            <h3 className="text-sm font-semibold">Macros Reference</h3>
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
-            <X size="1rem" />
-          </button>
-        </div>
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            Use these macros in your prompt sections. They will be replaced with actual values at generation time.
-          </p>
-          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            In group chats, a bracketed block containing character macros like <code>{"{{char}}"}</code> and{" "}
-            <code>{"{{description}}"}</code> repeats once per character.
-          </p>
-          {MACRO_REFERENCE.map((cat) => (
-            <div key={cat.category}>
-              <h4 className="mb-1.5 text-[0.6875rem] font-semibold text-purple-400">{cat.category}</h4>
-              <div className="space-y-1">
-                {cat.macros.map((m) => (
-                  <div key={m.macro} className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-[var(--accent)]">
-                    <code className="shrink-0 rounded bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] font-medium text-amber-400">
-                      {m.macro}
-                    </code>
-                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{m.desc}</span>
-                  </div>
-                ))}
-              </div>
+    <PresetModalPortal>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 max-md:pt-[max(1.5rem,env(safe-area-inset-top))]">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+        <div className="relative flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl shadow-black/50">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <div className="flex items-center gap-2">
+              <BookOpen size="1rem" className="text-purple-400" />
+              <h3 className="text-sm font-semibold">Macros Reference</h3>
             </div>
-          ))}
-        </div>
-        {/* Footer */}
-        <div className="border-t border-[var(--border)] px-4 py-2.5 text-center">
-          <button
-            onClick={onClose}
-            className="rounded-xl px-4 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
-          >
-            Close
-          </button>
+            <button onClick={onClose} className="rounded-lg p-1.5 hover:bg-[var(--accent)]">
+              <X size="1rem" />
+            </button>
+          </div>
+          {/* Content */}
+          <div className="flex-1 space-y-4 overflow-y-auto p-4">
+            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              Use these macros in your prompt sections. They will be replaced with actual values at generation time.
+            </p>
+            <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+              In group chats, a bracketed block containing character macros like <code>{"{{char}}"}</code> and{" "}
+              <code>{"{{description}}"}</code> repeats once per character.
+            </p>
+            {MACRO_REFERENCE.map((cat) => (
+              <div key={cat.category}>
+                <h4 className="mb-1.5 text-[0.6875rem] font-semibold text-purple-400">{cat.category}</h4>
+                <div className="space-y-1">
+                  {cat.macros.map((m) => (
+                    <div
+                      key={m.macro}
+                      className="flex items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-[var(--accent)]"
+                    >
+                      <code className="shrink-0 rounded bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] font-medium text-amber-400">
+                        {m.macro}
+                      </code>
+                      <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{m.desc}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* Footer */}
+          <div className="border-t border-[var(--border)] px-4 py-2.5 text-center">
+            <button
+              onClick={onClose}
+              className="rounded-xl px-4 py-1.5 text-xs font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </PresetModalPortal>
   );
 }
 

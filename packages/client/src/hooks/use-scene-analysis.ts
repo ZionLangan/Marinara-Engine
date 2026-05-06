@@ -2,7 +2,7 @@
 // Hook: useSceneAnalysis
 //
 // Sends completed narration to the local sidecar
-// model for scene analysis (backgrounds, music,
+// model for scene analysis (backgrounds, audio hints,
 // widgets, expressions, etc.) and returns the
 // structured result. Falls back to a regular
 // connection via /game/scene-wrap when sidecar

@@ -3,11 +3,13 @@
 // ──────────────────────────────────────────────
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api-client";
+import type { CharacterCardVersion } from "@marinara-engine/shared";
 
 export const characterKeys = {
   all: ["characters"] as const,
   list: () => [...characterKeys.all, "list"] as const,
   detail: (id: string) => [...characterKeys.all, "detail", id] as const,
+  versions: (id: string) => [...characterKeys.detail(id), "versions"] as const,
   gallery: (id: string) => [...characterKeys.all, "gallery", id] as const,
   personas: ["personas"] as const,
   groups: ["character-groups"] as const,
@@ -54,10 +56,47 @@ export function useUpdateCharacter() {
       data?: Record<string, unknown>;
       avatarPath?: string;
       comment?: string;
+      versionSource?: string;
+      versionReason?: string;
+      skipVersionSnapshot?: boolean;
     }) => api.patch(`/characters/${id}`, data),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: characterKeys.list() });
       qc.invalidateQueries({ queryKey: characterKeys.detail(variables.id) });
+      qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useCharacterVersions(id: string | null) {
+  return useQuery({
+    queryKey: characterKeys.versions(id ?? ""),
+    queryFn: () => api.get<CharacterCardVersion[]>(`/characters/${id}/versions`),
+    enabled: !!id,
+    staleTime: 60_000,
+  });
+}
+
+export function useRestoreCharacterVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId }: { id: string; versionId: string }) =>
+      api.post(`/characters/${id}/versions/${versionId}/restore`, {}),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.list() });
+      qc.invalidateQueries({ queryKey: characterKeys.detail(variables.id) });
+      qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useDeleteCharacterVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId }: { id: string; versionId: string }) =>
+      api.delete(`/characters/${id}/versions/${versionId}`),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
     },
   });
 }

@@ -4,8 +4,9 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api } from "../lib/api-client";
+import { api, isJsonRepairApiError } from "../lib/api-client";
 import { chatKeys } from "./use-chats";
+import { lorebookKeys } from "./use-lorebooks";
 import { useGameModeStore } from "../stores/game-mode.store";
 import { useGameStateStore } from "../stores/game-state.store";
 import { useChatStore } from "../stores/chat.store";
@@ -58,6 +59,12 @@ interface ConcludeSessionResponse {
 
 interface RegenerateSessionConclusionResponse {
   summary: SessionSummary;
+}
+
+interface RegenerateSessionLorebookResponse {
+  sessionNumber: number;
+  lorebookId: string;
+  entryCount: number;
 }
 
 interface UpdateCampaignProgressionResponse {
@@ -175,7 +182,11 @@ export function useGameSetup() {
 
   return useMutation({
     mutationFn: (data: { chatId: string; connectionId?: string; preferences: string }) =>
-      api.post<SetupResponse>("/game/setup", { ...data, streaming: useUIStore.getState().enableStreaming }),
+      api.post<SetupResponse>("/game/setup", {
+        ...data,
+        streaming: useUIStore.getState().enableStreaming,
+        debugMode: useUIStore.getState().debugMode,
+      }),
     onSuccess: () => {
       store.getState().setSetupActive(false);
       const sessionChatId = store.getState().activeSessionChatId;
@@ -186,6 +197,10 @@ export function useGameSetup() {
     },
     onError: (err) => {
       console.error("[gameSetup] Error:", err);
+      if (isJsonRepairApiError(err)) {
+        toast.info("The model response needs a quick JSON repair before it can be applied.", { duration: 8000 });
+        return;
+      }
       toast.error(err.message || "Game setup failed. Try again or use a different model.", { duration: 10000 });
     },
   });
@@ -257,7 +272,10 @@ export function useConcludeSession() {
 
   return useMutation({
     mutationFn: (data: { chatId: string; connectionId?: string; nextSessionRequest?: string }) =>
-      api.post<ConcludeSessionResponse>("/game/session/conclude", data),
+      api.post<ConcludeSessionResponse>("/game/session/conclude", {
+        ...data,
+        streaming: useUIStore.getState().enableStreaming,
+      }),
     onMutate: (variables) => {
       console.info("[game/session/conclude] Starting conclude request", variables);
       toast.loading("Ending session and generating summary...", {
@@ -274,6 +292,13 @@ export function useConcludeSession() {
     },
     onError: (err, variables) => {
       console.error("[game/session/conclude] Error:", err);
+      if (isJsonRepairApiError(err)) {
+        toast.info("Review the generated session JSON before applying it.", {
+          id: `game-session-conclude:${variables.chatId}`,
+          duration: 8000,
+        });
+        return;
+      }
       toast.error(err.message || "Failed to end session.", {
         id: `game-session-conclude:${variables.chatId}`,
       });
@@ -301,9 +326,50 @@ export function useRegenerateSessionConclusion() {
     },
     onError: (err, variables) => {
       console.error("[game/session/regenerate-conclusion] Error:", err);
+      if (isJsonRepairApiError(err)) {
+        toast.info("Review the regenerated session JSON before applying it.", {
+          id: `game-session-regenerate:${variables.chatId}:${variables.sessionNumber}`,
+          duration: 8000,
+        });
+        return;
+      }
       toast.error(err.message || "Failed to regenerate session conclusion.", {
         id: `game-session-regenerate:${variables.chatId}:${variables.sessionNumber}`,
       });
+    },
+  });
+}
+
+export function useRegenerateSessionLorebook() {
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: { chatId: string; sessionNumber: number; connectionId?: string }) =>
+      api.post<RegenerateSessionLorebookResponse>("/game/session/regenerate-lorebook", {
+        ...data,
+        streaming: useUIStore.getState().enableStreaming,
+      }),
+    onMutate: (variables) => {
+      toast.loading(`Regenerating session ${variables.sessionNumber} lorebook...`, {
+        id: `game-session-lorebook:${variables.chatId}:${variables.sessionNumber}`,
+      });
+    },
+    onSuccess: (result, variables) => {
+      toast.success(`Lorebook updated with ${result.entryCount} entr${result.entryCount === 1 ? "y" : "ies"}.`, {
+        id: `game-session-lorebook:${variables.chatId}:${variables.sessionNumber}`,
+      });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+      qc.invalidateQueries({ queryKey: lorebookKeys.all });
+      if (result.lorebookId) {
+        qc.invalidateQueries({ queryKey: lorebookKeys.entries(result.lorebookId) });
+      }
+    },
+    onError: (err, variables) => {
+      console.error("[game/session/regenerate-lorebook] Error:", err);
+      toast.error(err.message || "Failed to regenerate session lorebook.", {
+        id: `game-session-lorebook:${variables.chatId}:${variables.sessionNumber}`,
+      });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
     },
   });
 }
@@ -330,6 +396,13 @@ export function useUpdateCampaignProgression() {
     },
     onError: (err, variables) => {
       console.error("[game/session/update-campaign-progression] Error:", err);
+      if (isJsonRepairApiError(err)) {
+        toast.info("Review the generated plot JSON before applying it.", {
+          id: `game-campaign-progression:${variables.chatId}:${variables.sessionNumber}`,
+          duration: 8000,
+        });
+        return;
+      }
       toast.error(err.message || "Failed to update plot arcs.", {
         id: `game-campaign-progression:${variables.chatId}:${variables.sessionNumber}`,
       });
@@ -535,7 +608,7 @@ export function useSyncGameState(activeChatId: string, chatMeta: Record<string, 
     } else if (chatMeta.gameMap && chatMeta.gameMap !== state.currentMap) {
       useGameModeStore.getState().setCurrentMap(chatMeta.gameMap as GameMap);
     }
-    if (chatMeta.gameNpcs) {
+    if (Array.isArray(chatMeta.gameNpcs)) {
       useGameModeStore.getState().setNpcs(chatMeta.gameNpcs as any[]);
     }
     if (chatMeta.gameSessionNumber) {

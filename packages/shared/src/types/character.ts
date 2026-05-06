@@ -121,6 +121,19 @@ export interface Character {
   updatedAt: string;
 }
 
+/** Saved snapshot of a previous character card state. */
+export interface CharacterCardVersion {
+  id: string;
+  characterId: string;
+  data: CharacterData;
+  comment: string;
+  avatarPath: string | null;
+  version: string;
+  source: "manual" | "agent" | "command" | "restore" | string;
+  reason: string;
+  createdAt: string;
+}
+
 /** A group of characters (e.g. "Fatui Harbingers") — acts as a preset that adds all members to a chat. */
 export interface CharacterGroup {
   id: string;

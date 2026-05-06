@@ -32,6 +32,12 @@ export function errorHandler(error: FastifyError, _request: FastifyRequest, repl
   }
 
   // Known HTTP errors
+  if (error.statusCode === 413) {
+    return reply.status(413).send({
+      error: "Imported file is too large. Profile imports support files up to 256 MB.",
+    });
+  }
+
   if (error.statusCode) {
     return reply.status(error.statusCode).send({
       error: error.message,

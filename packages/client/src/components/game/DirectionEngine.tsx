@@ -5,7 +5,7 @@
 // Each direction maps to a CSS-driven effect applied as a layer
 // over the game viewport.
 // ──────────────────────────────────────────────
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import type { DirectionCommand } from "@marinara-engine/shared";
 
 /** Cross-fading background layer — renders two stacked layers and transitions between them. */
@@ -89,7 +89,7 @@ export function DirectionEngine({ directions, backgroundUrl, onPlayingChange, ch
   const processedRef = useRef<string>("");
 
   // Queue incoming directions (dedupe by stringifying to avoid re-firing)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (directions.length === 0) {
       processedRef.current = "";
       return;

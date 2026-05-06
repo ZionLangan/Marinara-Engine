@@ -50,9 +50,7 @@ export function QuickSwitcherMobile() {
   const activePersonaId = (chat as unknown as Record<string, unknown>)?.personaId as string | null;
   const isRandom = activeConnectionId === "random";
 
-  const sortedConnections = (
-    (connections ?? []) as Array<{ id: string; name: string; useForRandom?: string }>
-  )
+  const sortedConnections = ((connections ?? []) as Array<{ id: string; name: string; useForRandom?: string }>)
     .slice()
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 

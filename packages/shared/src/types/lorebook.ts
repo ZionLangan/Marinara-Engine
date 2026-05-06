@@ -11,6 +11,19 @@ export type SelectiveLogic = "and" | "or" | "not";
 /** Role for injected lorebook content. */
 export type LorebookRole = "system" | "user" | "assistant";
 
+/** Include/exclude behavior for contextual lorebook filters. */
+export type LorebookFilterMode = "any" | "include" | "exclude";
+
+/** Extra places an entry can scan for keyword matches beyond recent chat text. */
+export type LorebookMatchingSource =
+  | "character_name"
+  | "character_description"
+  | "character_personality"
+  | "character_scenario"
+  | "character_tags"
+  | "persona_description"
+  | "persona_tags";
+
 /** A complete lorebook (collection of entries). */
 export interface Lorebook {
   id: string;
@@ -20,7 +33,7 @@ export interface Lorebook {
   category: LorebookCategory;
   /** Default scan depth for entries that don't override */
   scanDepth: number;
-  /** Max tokens allocated to this lorebook */
+  /** Max output tokens allocated to this lorebook */
   tokenBudget: number;
   recursiveScanning: boolean;
   /** Maximum recursion depth for recursive scanning (default 3) */
@@ -38,6 +51,42 @@ export interface Lorebook {
   /** Agent/generation origin tracking */
   generatedBy: "user" | "agent" | "import" | "lorebook-maker" | "wiki-import" | null;
   sourceAgentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A collapsible container that groups lorebook entries to reduce visual
+ * clutter in the editor. Folders are flat in v1 — `parentFolderId` is reserved
+ * for future nested-folder support and must currently be null.
+ *
+ * Folder enable/disable acts as a gate: when `enabled` is false, every entry
+ * inside the folder is treated as inactive at activation time, regardless of
+ * the entry's own `enabled` flag. The entry's own flag is preserved (the
+ * folder toggle does NOT mutate it), so re-enabling the folder restores the
+ * entries' previous individual settings.
+ *
+ * Folders sit above root-level entries in the editor display. Folder display
+ * order among siblings is controlled by `order`. Entry `order` continues to
+ * control prompt-injection priority and per-container display sort.
+ */
+export interface LorebookFolder {
+  id: string;
+  lorebookId: string;
+  /** Display name shown on the folder header row. */
+  name: string;
+  /**
+   * When false, every entry whose `folderId` matches this folder is skipped
+   * during activation, regardless of the entry's own `enabled` flag.
+   */
+  enabled: boolean;
+  /**
+   * Reserved for future nested-folder support. Always null in v1; the server
+   * rejects non-null values.
+   */
+  parentFolderId: string | null;
+  /** Display order among sibling folders (lower = higher in the list). */
+  order: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +118,20 @@ export interface LorebookEntry {
   caseSensitive: boolean;
   /** Use regex matching for keys */
   useRegex: boolean;
+  /**
+   * Character gates for activation. These are independent from lorebook tags,
+   * which are only organizational.
+   */
+  characterFilterMode: LorebookFilterMode;
+  characterFilterIds: string[];
+  /** Character-card tag gates for activation. */
+  characterTagFilterMode: LorebookFilterMode;
+  characterTagFilters: string[];
+  /** Generation trigger gates (chat, game, swipe, lorebook_assistant, etc.). */
+  generationTriggerFilterMode: LorebookFilterMode;
+  generationTriggerFilters: string[];
+  /** Additional non-chat sources to include when matching entry keywords. */
+  additionalMatchingSources: LorebookMatchingSource[];
 
   // ── Injection settings ──
   /** 0 = before character, 1 = after character, 2 = inject at message depth */
@@ -92,6 +155,14 @@ export interface LorebookEntry {
   // ── Grouping ──
   group: string;
   groupWeight: number | null;
+  /**
+   * ID of the folder this entry belongs to, or null if it lives at the
+   * lorebook root level. Display sort by `order` is per-container — entries
+   * inside a folder sort independently from root entries and from entries in
+   * other folders. When a folder is disabled, every entry whose `folderId`
+   * matches is excluded from activation regardless of `enabled`.
+   */
+  folderId: string | null;
 
   // ── Engine extensions (beyond ST) ──
   /** When true, the Lorebook Keeper agent cannot modify or overwrite this entry */

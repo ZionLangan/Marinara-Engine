@@ -25,7 +25,9 @@ interface GameGridMapProps {
   selectedPosition?: { x: number; y: number } | string | null;
   disabled?: boolean;
   showPartyPosition?: boolean;
+  zoom?: number;
   topLeftAction?: ReactNode;
+  topRightAction?: ReactNode;
 }
 
 export function GameGridMap({
@@ -34,7 +36,9 @@ export function GameGridMap({
   selectedPosition,
   disabled,
   showPartyPosition = true,
+  zoom = 1,
   topLeftAction,
+  topRightAction,
 }: GameGridMapProps) {
   const cells = map.cells || [];
   const width = map.width || 5;
@@ -86,48 +90,64 @@ export function GameGridMap({
       </div>
       <div className="relative">
         {topLeftAction}
-        <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${width}, minmax(0, 1fr))` }}>
-          {rows.map((row) =>
-            row.map((cell) => {
-              const isParty = partyPos && partyPos.x === cell.x && partyPos.y === cell.y;
-              const isSelected = selectedCell && selectedCell.x === cell.x && selectedCell.y === cell.y;
-              const isAdjacent = adjacentSet.has(`${cell.x},${cell.y}`);
-              const isMovable = !disabled && isAdjacent && cell.discovered;
-              const terrainBg = TERRAIN_COLORS[cell.terrain] || "bg-gray-800/40";
+        {topRightAction}
+        <div
+          className="w-full overflow-auto rounded"
+          style={{
+            aspectRatio: `${width} / ${height}`,
+            maxHeight: "min(52vh, 340px)",
+          }}
+        >
+          <div
+            className="grid gap-0.5"
+            style={{
+              gridTemplateColumns: `repeat(${width}, minmax(0, 1fr))`,
+              width: `${zoom * 100}%`,
+              marginInline: zoom < 1 ? "auto" : undefined,
+            }}
+          >
+            {rows.map((row) =>
+              row.map((cell) => {
+                const isParty = partyPos && partyPos.x === cell.x && partyPos.y === cell.y;
+                const isSelected = selectedCell && selectedCell.x === cell.x && selectedCell.y === cell.y;
+                const isAdjacent = adjacentSet.has(`${cell.x},${cell.y}`);
+                const isMovable = !disabled && isAdjacent && cell.discovered;
+                const terrainBg = TERRAIN_COLORS[cell.terrain] || "bg-gray-800/40";
 
-              return (
-                <button
-                  key={`${cell.x},${cell.y}`}
-                  onClick={() => isMovable && onCellClick(cell.x, cell.y)}
-                  disabled={!isMovable}
-                  title={
-                    cell.discovered
-                      ? `${cell.label}: ${cell.description || cell.terrain}${isMovable ? " (click to select)" : ""}`
-                      : "Undiscovered"
-                  }
-                  className={cn(
-                    "relative flex aspect-square items-center justify-center rounded text-base transition-all",
-                    cell.discovered ? terrainBg : "bg-gray-900/70 game-map-fog",
-                    isParty && "ring-2 ring-amber-400 ring-offset-1 ring-offset-[var(--card)]",
-                    isSelected && !isParty && "ring-2 ring-sky-400/70 ring-offset-1 ring-offset-[var(--card)]",
-                    isMovable && "hover:brightness-125 cursor-pointer ring-1 ring-amber-400/30",
-                    !isMovable && "cursor-default opacity-80",
-                  )}
-                >
-                  {cell.discovered ? (
-                    <>
-                      <span className="text-sm">{cell.emoji}</span>
-                      {isParty && (
-                        <span className="absolute -bottom-0.5 -right-0.5 text-[10px] game-party-marker">📍</span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-sm opacity-50">❓</span>
-                  )}
-                </button>
-              );
-            }),
-          )}
+                return (
+                  <button
+                    key={`${cell.x},${cell.y}`}
+                    onClick={() => isMovable && onCellClick(cell.x, cell.y)}
+                    disabled={!isMovable}
+                    title={
+                      cell.discovered
+                        ? `${cell.label}: ${cell.description || cell.terrain}${isMovable ? " (click to select)" : ""}`
+                        : "Undiscovered"
+                    }
+                    className={cn(
+                      "relative flex aspect-square items-center justify-center rounded text-base transition-all",
+                      cell.discovered ? terrainBg : "bg-gray-900/70 game-map-fog",
+                      isParty && "ring-2 ring-amber-400 ring-offset-1 ring-offset-[var(--card)]",
+                      isSelected && !isParty && "ring-2 ring-sky-400/70 ring-offset-1 ring-offset-[var(--card)]",
+                      isMovable && "hover:brightness-125 cursor-pointer ring-1 ring-amber-400/30",
+                      !isMovable && "cursor-default opacity-80",
+                    )}
+                  >
+                    {cell.discovered ? (
+                      <>
+                        <span className="text-sm">{cell.emoji}</span>
+                        {isParty && (
+                          <span className="absolute -bottom-0.5 -right-0.5 text-[10px] game-party-marker">📍</span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-sm opacity-50">❓</span>
+                    )}
+                  </button>
+                );
+              }),
+            )}
+          </div>
         </div>
       </div>
     </div>

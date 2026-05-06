@@ -146,6 +146,8 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       sdkOptions.env = { ...process.env, ANTHROPIC_API_KEY: this.apiKey };
     }
 
+    this.applyCustomParameters(sdkOptions as Record<string, unknown>, options);
+
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;

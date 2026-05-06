@@ -490,15 +490,15 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
     <>
       <div className="absolute inset-0 z-40 bg-black/40 backdrop-blur-[3px]" onClick={onFinish} />
 
-      <div className="absolute inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+      <div className="absolute inset-0 z-50 flex items-center justify-center p-3 pointer-events-none max-md:pt-[max(0.75rem,env(safe-area-inset-top))] max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4">
         <motion.div
           initial={{ opacity: 0, y: 16, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
-          className="pointer-events-auto w-full max-w-sm max-h-[90vh] flex flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl overflow-hidden"
+          className="pointer-events-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl sm:max-h-[min(90dvh,42rem)]"
         >
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+          <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
             <div className="flex items-center gap-2">
               <MessageCircle size="0.875rem" className="text-[var(--primary)]" />
               <h3 className="text-sm font-semibold text-[var(--foreground)]">New Conversation</h3>
@@ -511,7 +511,7 @@ function ConversationQuickSetup({ chat, onFinish }: ChatSetupWizardProps) {
             </button>
           </div>
 
-          <div className="p-4 space-y-4 overflow-y-auto min-h-0 flex-1">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4">
             {/* Conversation name */}
             <div className="space-y-1.5">
               <label className="text-[0.6875rem] font-medium text-[var(--muted-foreground)] uppercase tracking-wider">
@@ -1373,7 +1373,7 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
       {/* Wizard card — centered (hidden while choice modal is open) */}
       <div
         className={cn(
-          "absolute inset-0 z-50 flex items-center justify-center p-4 pointer-events-none",
+          "absolute inset-0 z-50 flex items-center justify-center p-3 pointer-events-none max-md:pt-[max(0.75rem,env(safe-area-inset-top))] max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4",
           showChoiceModal && "hidden",
         )}
       >
@@ -1385,10 +1385,10 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -12, scale: 0.97 }}
               transition={{ duration: 0.2, ease: "easeOut" }}
-              className="pointer-events-auto w-full max-w-sm max-h-[90vh] flex flex-col rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl overflow-hidden"
+              className="pointer-events-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl sm:max-h-[min(90dvh,42rem)]"
             >
               {/* Header */}
-              <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+              <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
                 <button
                   onClick={() => setShortcutMode(false)}
                   className="flex items-center gap-1.5 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
@@ -1409,7 +1409,7 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4">
                 <p className="text-center text-xs leading-relaxed text-[var(--muted-foreground)]">
                   Pick a preset, your persona, and any characters to instantly configure this roleplay.
                 </p>
@@ -1560,7 +1560,7 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
               </div>
 
               {/* Footer */}
-              <div className="border-t border-[var(--border)] px-4 py-3 flex items-center justify-between">
+              <div className="flex shrink-0 items-center justify-between border-t border-[var(--border)] px-4 py-3">
                 <button
                   onClick={() => setShortcutMode(false)}
                   className="rounded-lg px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
@@ -1593,72 +1593,76 @@ function RoleplaySetupWizard({ chat, onFinish }: ChatSetupWizardProps) {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -12, scale: 0.97 }}
               transition={{ duration: 0.2, ease: "easeOut" }}
-              className="pointer-events-auto w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-2xl"
+              className="pointer-events-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl sm:max-h-[min(90dvh,42rem)]"
             >
-              {/* Sprite */}
-              <div className="mb-3 flex justify-center">
-                <img
-                  src={currentStep.sprite}
-                  alt="Professor Mari"
-                  className="h-28 w-auto object-contain drop-shadow-lg"
-                  style={currentStep.spriteFlip ? { transform: "scaleX(-1)" } : undefined}
-                  draggable={false}
-                />
-              </div>
-
-              {/* Title */}
-              <h3 className="mb-1 text-center text-sm font-semibold text-[var(--foreground)]">{currentStep.title}</h3>
-
-              {/* Body */}
-              <p className="mb-4 text-center text-xs leading-relaxed text-[var(--muted-foreground)]">
-                {currentStep.body}
-              </p>
-
-              {/* Step content */}
-              <div className="mb-4">{stepRenderers[currentStep.key]?.()}</div>
-
-              {/* Progress dots */}
-              <div className="mb-3 flex items-center justify-center gap-1.5">
-                {STEPS.map((_, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      "h-1.5 rounded-full transition-all duration-300",
-                      i === step
-                        ? "w-4 bg-[var(--primary)]"
-                        : i < step
-                          ? "w-1.5 bg-[var(--primary)]/40"
-                          : "w-1.5 bg-[var(--muted-foreground)]/20",
-                    )}
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-3 pt-5">
+                {/* Sprite */}
+                <div className="mb-3 flex justify-center">
+                  <img
+                    src={currentStep.sprite}
+                    alt="Professor Mari"
+                    className="h-24 w-auto object-contain drop-shadow-lg sm:h-28"
+                    style={currentStep.spriteFlip ? { transform: "scaleX(-1)" } : undefined}
+                    draggable={false}
                   />
-                ))}
+                </div>
+
+                {/* Title */}
+                <h3 className="mb-1 text-center text-sm font-semibold text-[var(--foreground)]">{currentStep.title}</h3>
+
+                {/* Body */}
+                <p className="mb-4 text-center text-xs leading-relaxed text-[var(--muted-foreground)]">
+                  {currentStep.body}
+                </p>
+
+                {/* Step content */}
+                <div>{stepRenderers[currentStep.key]?.()}</div>
               </div>
 
-              {/* Buttons */}
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  onClick={onFinish}
-                  className="rounded-lg px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
-                >
-                  Skip
-                </button>
-                <button
-                  onClick={() => setShortcutMode(true)}
-                  title="Apply a saved chat-settings preset and pick a persona + characters in one step"
-                  className="flex items-center gap-1.5 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-1.5 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/20"
-                >
-                  <Wand2 size="0.75rem" />
-                  <span className="hidden xs:inline sm:inline">Use Settings Presets</span>
-                  <span className="inline xs:hidden sm:hidden">Presets</span>
-                </button>
-                <button
-                  onClick={next}
-                  disabled={nextDisabled}
-                  className="flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-4 py-1.5 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
-                >
-                  {isLast ? "Done" : "Next"}
-                  {isLast ? <Check size="0.75rem" /> : <ChevronRight size="0.75rem" />}
-                </button>
+              <div className="shrink-0 border-t border-[var(--border)]/70 px-5 py-3">
+                {/* Progress dots */}
+                <div className="mb-3 flex items-center justify-center gap-1.5">
+                  {STEPS.map((_, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "h-1.5 rounded-full transition-all duration-300",
+                        i === step
+                          ? "w-4 bg-[var(--primary)]"
+                          : i < step
+                            ? "w-1.5 bg-[var(--primary)]/40"
+                            : "w-1.5 bg-[var(--muted-foreground)]/20",
+                      )}
+                    />
+                  ))}
+                </div>
+
+                {/* Buttons */}
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    onClick={onFinish}
+                    className="rounded-lg px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
+                  >
+                    Skip
+                  </button>
+                  <button
+                    onClick={() => setShortcutMode(true)}
+                    title="Apply a saved chat-settings preset and pick a persona + characters in one step"
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-1.5 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/20"
+                  >
+                    <Wand2 size="0.75rem" />
+                    <span className="hidden xs:inline sm:inline">Use Settings Presets</span>
+                    <span className="inline xs:hidden sm:hidden">Presets</span>
+                  </button>
+                  <button
+                    onClick={next}
+                    disabled={nextDisabled}
+                    className="flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-4 py-1.5 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+                  >
+                    {isLast ? "Done" : "Next"}
+                    {isLast ? <Check size="0.75rem" /> : <ChevronRight size="0.75rem" />}
+                  </button>
+                </div>
               </div>
             </motion.div>
           )}

@@ -503,9 +503,16 @@ export const BUILT_IN_AGENT_RUN_INTERVAL_DEFAULTS: Readonly<Record<string, numbe
   "chat-summary": 5,
 };
 
+export const DEFAULT_AGENT_CONTEXT_SIZE = 5;
+export const DEFAULT_AGENT_MAX_TOKENS = 4096;
+export const MIN_AGENT_MAX_TOKENS = 128;
+export const MAX_AGENT_MAX_TOKENS = 32768;
+
 export function getDefaultBuiltInAgentSettings(agentType: string): Record<string, unknown> {
   const builtIn = BUILT_IN_AGENTS.find((agent) => agent.id === agentType);
-  const settings: Record<string, unknown> = {};
+  const settings: Record<string, unknown> = {
+    maxTokens: DEFAULT_AGENT_MAX_TOKENS,
+  };
 
   if (builtIn?.defaultInjectAsSection) {
     settings.injectAsSection = true;
@@ -816,6 +823,29 @@ export const BUILT_IN_TOOLS: ToolDefinition[] = [
         category: { type: "string", description: "Optional category filter" },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "read_chat_summary",
+    description: "Read the current persisted chat summary for this chat.",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "append_chat_summary",
+    description: "Append durable memory text to the persisted chat summary for this chat.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description:
+            "Concise summary text to append. Include only durable facts, plans, preferences, or story developments.",
+        },
+      },
+      required: ["text"],
     },
   },
   {

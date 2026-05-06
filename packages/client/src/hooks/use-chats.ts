@@ -9,9 +9,11 @@ import { useGameStateStore } from "../stores/game-state.store";
 import { useEncounterStore } from "../stores/encounter.store";
 import { useUIStore } from "../stores/ui.store";
 import { clearBrowserRuntimeCaches } from "../lib/browser-runtime";
+import { ApiError } from "../lib/api-client";
 import type {
   Chat,
   ChatMemoryChunk,
+  ConversationNote,
   Message,
   MessageSwipe,
   DaySummaryEntry,
@@ -25,6 +27,7 @@ export const chatKeys = {
   messages: (chatId: string) => [...chatKeys.all, "messages", chatId] as const,
   messageCount: (chatId: string) => [...chatKeys.all, "messageCount", chatId] as const,
   memories: (chatId: string) => [...chatKeys.all, "memories", chatId] as const,
+  notes: (chatId: string) => [...chatKeys.all, "notes", chatId] as const,
   group: (groupId: string) => [...chatKeys.all, "group", groupId] as const,
 };
 
@@ -37,6 +40,16 @@ export type ExpungeScope =
   | "connections"
   | "automation"
   | "media";
+
+export interface ConversationSummaryBackfillResult {
+  generatedDays: string[];
+  consolidatedWeeks: string[];
+  failedDays: Array<{ date: string; error: string }>;
+  failedWeeks: Array<{ weekKey: string; error: string }>;
+  missingDayCount: number;
+  processedDayCount: number;
+  remainingMissingDayCount: number;
+}
 
 async function resetClientAfterExpunge(qc: ReturnType<typeof useQueryClient>) {
   await clearBrowserRuntimeCaches();
@@ -57,7 +70,15 @@ export function useChats() {
   return useQuery({
     queryKey: chatKeys.list(),
     queryFn: () => api.get<Chat[]>("/chats"),
-    staleTime: 2 * 60_000,
+    staleTime: 10_000,
+    refetchOnMount: "always",
+    refetchOnReconnect: true,
+    retry: (failureCount, error) => {
+      const status = error instanceof ApiError ? error.status : 0;
+      if (status >= 400 && status < 500 && status !== 408 && status !== 429) return false;
+      return failureCount < 10;
+    },
+    retryDelay: (attempt) => Math.min(750 * 2 ** attempt, 5_000),
   });
 }
 
@@ -83,7 +104,11 @@ export function useChatMessages(chatId: string | null, pageSize: number = 0, ena
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => {
       if (pageSize <= 0 || lastPage.length < pageSize) return undefined;
-      return lastPage[0]?.createdAt;
+      const oldestLoaded = lastPage[0];
+      if (!oldestLoaded) return undefined;
+      return typeof oldestLoaded.rowid === "number"
+        ? `${oldestLoaded.createdAt}|${oldestLoaded.rowid}`
+        : oldestLoaded.createdAt;
     },
     enabled: !!chatId && enabled,
   });
@@ -123,6 +148,35 @@ export function useClearChatMemories(chatId: string | null) {
     mutationFn: () => api.delete(`/chats/${chatId}/memories`),
     onSuccess: () => {
       if (chatId) qc.invalidateQueries({ queryKey: chatKeys.memories(chatId) });
+    },
+  });
+}
+
+export function useChatNotes(chatId: string | null) {
+  return useQuery({
+    queryKey: chatKeys.notes(chatId ?? ""),
+    queryFn: () => api.get<ConversationNote[]>(`/chats/${chatId}/notes`),
+    enabled: !!chatId,
+    staleTime: 10_000,
+  });
+}
+
+export function useDeleteChatNote(chatId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (noteId: string) => api.delete(`/chats/${chatId}/notes/${noteId}`),
+    onSuccess: () => {
+      if (chatId) qc.invalidateQueries({ queryKey: chatKeys.notes(chatId) });
+    },
+  });
+}
+
+export function useClearChatNotes(chatId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.delete(`/chats/${chatId}/notes`),
+    onSuccess: () => {
+      if (chatId) qc.invalidateQueries({ queryKey: chatKeys.notes(chatId) });
     },
   });
 }
@@ -284,6 +338,18 @@ export function useUpdateChatSummaries() {
   });
 }
 
+/** Backfill missing conversation day/week summaries via the LLM. */
+export function useBackfillConversationSummaries() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ chatId, maxMissingDays }: { chatId: string; maxMissingDays?: number }) =>
+      api.post<ConversationSummaryBackfillResult>(`/chats/${chatId}/backfill-summaries`, { maxMissingDays }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: chatKeys.detail(vars.chatId) });
+    },
+  });
+}
+
 export function useCreateMessage(chatId: string | null) {
   const qc = useQueryClient();
   return useMutation({
@@ -371,7 +437,39 @@ export function useUpdateMessageExtra(chatId: string | null) {
   return useMutation({
     mutationFn: ({ messageId, extra }: { messageId: string; extra: Record<string, unknown> }) =>
       api.patch<Message>(`/chats/${chatId}/messages/${messageId}/extra`, extra),
-    onSuccess: () => {
+    onMutate: async ({ messageId, extra }) => {
+      if (!chatId) return;
+      await qc.cancelQueries({ queryKey: chatKeys.messages(chatId) });
+      const previous = qc.getQueryData<InfiniteData<Message[]>>(chatKeys.messages(chatId));
+      qc.setQueryData<InfiniteData<Message[]>>(chatKeys.messages(chatId), (old) => {
+        if (!old?.pages) return old;
+        return {
+          ...old,
+          pages: old.pages.map((page) =>
+            page.map((msg) => {
+              if (msg.id !== messageId) return msg;
+              let currentExtra: Record<string, unknown> = {};
+              try {
+                currentExtra =
+                  typeof msg.extra === "string"
+                    ? JSON.parse(msg.extra)
+                    : ((msg.extra ?? {}) as unknown as Record<string, unknown>);
+              } catch {
+                currentExtra = {};
+              }
+              return { ...msg, extra: { ...currentExtra, ...extra } as unknown as Message["extra"] };
+            }),
+          ),
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (chatId && context?.previous) {
+        qc.setQueryData(chatKeys.messages(chatId), context.previous);
+      }
+    },
+    onSettled: () => {
       if (chatId) {
         qc.invalidateQueries({ queryKey: chatKeys.messages(chatId) });
       }
@@ -394,6 +492,7 @@ export function usePeekPrompt() {
           showThoughts?: boolean | null;
           reasoningEffort?: string | null;
           verbosity?: string | null;
+          assistantPrefill?: string | null;
           tokensPrompt?: number | null;
           tokensCompletion?: number | null;
           tokensCachedPrompt?: number | null;

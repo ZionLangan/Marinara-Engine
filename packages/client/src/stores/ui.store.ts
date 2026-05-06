@@ -20,13 +20,59 @@ export type HudPosition = "top" | "left" | "right";
 export type EchoChamberSide = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 export type UserStatus = "active" | "idle" | "dnd";
 export type RoleplayAvatarStyle = "circles" | "rectangles" | "panel";
+export type GameDialogueDisplayMode = "classic" | "stacked";
 export const APP_LANGUAGE_OPTIONS = [{ id: "en", label: "English" }] as const;
 export type AppLanguage = (typeof APP_LANGUAGE_OPTIONS)[number]["id"];
 
-const SIDEBAR_WIDTH_MIN = 240;
-const SIDEBAR_WIDTH_MAX = 480;
-const RIGHT_PANEL_WIDTH_MIN = 280;
-const RIGHT_PANEL_WIDTH_MAX = 520;
+export interface GameSetupLearnedOptions {
+  genres: string[];
+  tones: string[];
+  settings: string[];
+  goals: string[];
+}
+
+export const SIDEBAR_WIDTH_MIN = 240;
+export const SIDEBAR_WIDTH_MAX = 480;
+export const RIGHT_PANEL_WIDTH_MIN = 280;
+export const RIGHT_PANEL_WIDTH_MAX = 520;
+const IMAGE_DIMENSION_MIN = 64;
+const IMAGE_DIMENSION_MAX = 4096;
+const GAME_SETUP_LEARNED_LIMIT = 60;
+
+const DEFAULT_GAME_SETUP_LEARNED_OPTIONS: GameSetupLearnedOptions = {
+  genres: [],
+  tones: [],
+  settings: [],
+  goals: [],
+};
+
+function clampImageDimension(value: number) {
+  const rounded = Number.isFinite(value) ? Math.round(value) : 0;
+  return Math.max(IMAGE_DIMENSION_MIN, Math.min(IMAGE_DIMENSION_MAX, rounded));
+}
+
+function normalizeLearnedGameSetupOption(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+function mergeLearnedGameSetupOptions(existing: string[] | undefined, incoming: unknown[]) {
+  const byKey = new Map<string, string>();
+
+  for (const value of existing ?? []) {
+    const normalized = normalizeLearnedGameSetupOption(value);
+    if (normalized) byKey.set(normalized.toLowerCase(), normalized);
+  }
+
+  for (const value of [...incoming].reverse()) {
+    const normalized = normalizeLearnedGameSetupOption(value);
+    if (!normalized) continue;
+    byKey.delete(normalized.toLowerCase());
+    byKey.set(normalized.toLowerCase(), normalized);
+  }
+
+  return [...byKey.values()].reverse().slice(0, GAME_SETUP_LEARNED_LIMIT);
+}
 
 /** Legacy browser-local custom theme preserved for one-time migration. */
 export interface CustomTheme {
@@ -105,10 +151,20 @@ interface UIState {
    * to where they were reading.
    */
   gameMiddleMouseNav: boolean;
+  /** Game mode dialogue layout: classic VN box or a VN box with a scrollable segment history above it. */
+  gameDialogueDisplayMode: GameDialogueDisplayMode;
   /** Game narration text speed: 1 (very slow) to 100 (instant). Controls the typewriter in game mode. */
   gameTextSpeed: number;
   /** Delay in ms between auto-advancing narration segments when auto-play is enabled. */
   gameAutoPlayDelay: number;
+  /** When true, generated game image prompts are shown for review before provider calls are sent. */
+  reviewImagePromptsBeforeSend: boolean;
+  imageBackgroundWidth: number;
+  imageBackgroundHeight: number;
+  imagePortraitWidth: number;
+  imagePortraitHeight: number;
+  imageSelfieWidth: number;
+  imageSelfieHeight: number;
 
   messageGrouping: boolean;
   showTimestamps: boolean;
@@ -121,6 +177,14 @@ interface UIState {
   messagesPerPage: number;
   /** Bold quoted dialogue in chat messages; color highlighting can still remain when this is off */
   boldDialogue: boolean;
+  /** When true, model responses are trimmed back to the last complete sentence before saving. */
+  trimIncompleteModelOutput: boolean;
+  /** When true, chat inputs show a microphone button for browser speech-to-text dictation. */
+  speechToTextEnabled: boolean;
+  /** When true, Roleplay and Conversation modes support arrow-key and touch-swipe navigation between message swipes. */
+  intuitiveSwipeNavigation: boolean;
+  /** When true, moving past the newest swipe on the latest assistant message creates a new reroll. */
+  intuitiveSwipeRerollLatest: boolean;
 
   // ── Text Appearance ──
   /** Color for narrator text in RP mode (empty = default amber) */
@@ -143,9 +207,11 @@ interface UIState {
   // ── Visual Theme ──
   visualTheme: VisualTheme;
 
-  // ── Conversation Gradient ──
-  convoGradientFrom: string;
-  convoGradientTo: string;
+  // ── Conversation Gradient (per color-scheme) ──
+  convoGradient: {
+    dark: { from: string; to: string };
+    light: { from: string; to: string };
+  };
 
   // ── Sound ──
   convoNotificationSound: boolean;
@@ -158,6 +224,8 @@ interface UIState {
   // ── Schedule Generation Preferences ──
   /** Free-form user guidance injected into the conversation-mode schedule generation prompt (empty = unset). */
   scheduleGenerationPreferences: string;
+  /** Custom Game setup chips learned from previous games. Synced so they follow the user. */
+  learnedGameSetupOptions: GameSetupLearnedOptions;
 
   // ── Input ──
   enterToSendRP: boolean;
@@ -196,6 +264,8 @@ interface UIState {
   userStatusManual: UserStatus;
   /** Effective status: matches manual, but auto-flips to "idle" on inactivity */
   userStatus: UserStatus;
+  /** Optional short activity shown with the user's status in Conversation mode. */
+  userActivity: string;
 
   /** Transient: true when center content area is too narrow (overflow detected) */
   centerCompact: boolean;
@@ -251,8 +321,13 @@ interface UIState {
   setStreamingSpeed: (v: number) => void;
   setGameInstantTextReveal: (v: boolean) => void;
   setGameMiddleMouseNav: (v: boolean) => void;
+  setGameDialogueDisplayMode: (v: GameDialogueDisplayMode) => void;
   setGameTextSpeed: (v: number) => void;
   setGameAutoPlayDelay: (v: number) => void;
+  setReviewImagePromptsBeforeSend: (v: boolean) => void;
+  setImageBackgroundDimensions: (width: number, height: number) => void;
+  setImagePortraitDimensions: (width: number, height: number) => void;
+  setImageSelfieDimensions: (width: number, height: number) => void;
 
   setMessageGrouping: (v: boolean) => void;
   setShowTimestamps: (v: boolean) => void;
@@ -263,6 +338,10 @@ interface UIState {
   setConfirmBeforeDelete: (v: boolean) => void;
   setMessagesPerPage: (n: number) => void;
   setBoldDialogue: (v: boolean) => void;
+  setTrimIncompleteModelOutput: (v: boolean) => void;
+  setSpeechToTextEnabled: (v: boolean) => void;
+  setIntuitiveSwipeNavigation: (v: boolean) => void;
+  setIntuitiveSwipeRerollLatest: (v: boolean) => void;
   setNarrationFontColor: (v: string) => void;
   setNarrationOpacity: (v: number) => void;
   setChatFontColor: (v: string) => void;
@@ -273,12 +352,12 @@ interface UIState {
   setTextStrokeColor: (v: string) => void;
   setCenterCompact: (v: boolean) => void;
   setVisualTheme: (v: VisualTheme) => void;
-  setConvoGradientFrom: (v: string) => void;
-  setConvoGradientTo: (v: string) => void;
+  setConvoGradientField: (scheme: "dark" | "light", field: "from" | "to", value: string) => void;
   setConvoNotificationSound: (v: boolean) => void;
   setRpNotificationSound: (v: boolean) => void;
   setCustomConversationPrompt: (v: string | null) => void;
   setScheduleGenerationPreferences: (v: string) => void;
+  rememberGameSetupOptions: (options: Partial<GameSetupLearnedOptions>) => void;
   setEnterToSendRP: (v: boolean) => void;
   setEnterToSendConvo: (v: boolean) => void;
   setEnterToSendGame: (v: boolean) => void;
@@ -301,6 +380,7 @@ interface UIState {
   setEchoChamberSide: (side: EchoChamberSide) => void;
   setUserStatus: (status: UserStatus) => void;
   setUserStatusManual: (status: UserStatus) => void;
+  setUserActivity: (activity: string) => void;
 }
 
 /**
@@ -323,8 +403,16 @@ export function pickSyncedSettings(state: UIState) {
     streamingSpeed: state.streamingSpeed,
     gameInstantTextReveal: state.gameInstantTextReveal,
     gameMiddleMouseNav: state.gameMiddleMouseNav,
+    gameDialogueDisplayMode: state.gameDialogueDisplayMode,
     gameTextSpeed: state.gameTextSpeed,
     gameAutoPlayDelay: state.gameAutoPlayDelay,
+    reviewImagePromptsBeforeSend: state.reviewImagePromptsBeforeSend,
+    imageBackgroundWidth: state.imageBackgroundWidth,
+    imageBackgroundHeight: state.imageBackgroundHeight,
+    imagePortraitWidth: state.imagePortraitWidth,
+    imagePortraitHeight: state.imagePortraitHeight,
+    imageSelfieWidth: state.imageSelfieWidth,
+    imageSelfieHeight: state.imageSelfieHeight,
 
     messageGrouping: state.messageGrouping,
     showTimestamps: state.showTimestamps,
@@ -335,6 +423,10 @@ export function pickSyncedSettings(state: UIState) {
     confirmBeforeDelete: state.confirmBeforeDelete,
     messagesPerPage: state.messagesPerPage,
     boldDialogue: state.boldDialogue,
+    trimIncompleteModelOutput: state.trimIncompleteModelOutput,
+    speechToTextEnabled: state.speechToTextEnabled,
+    intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
+    intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
     narrationFontColor: state.narrationFontColor,
     narrationOpacity: state.narrationOpacity,
     chatFontColor: state.chatFontColor,
@@ -344,8 +436,7 @@ export function pickSyncedSettings(state: UIState) {
     textStrokeWidth: state.textStrokeWidth,
     textStrokeColor: state.textStrokeColor,
     visualTheme: state.visualTheme,
-    convoGradientFrom: state.convoGradientFrom,
-    convoGradientTo: state.convoGradientTo,
+    convoGradient: state.convoGradient,
     enterToSendRP: state.enterToSendRP,
     enterToSendConvo: state.enterToSendConvo,
     weatherEffects: state.weatherEffects,
@@ -355,10 +446,12 @@ export function pickSyncedSettings(state: UIState) {
     linkApiBannerDismissed: state.linkApiBannerDismissed,
     echoChamberSide: state.echoChamberSide,
     userStatusManual: state.userStatusManual,
+    userActivity: state.userActivity,
     convoNotificationSound: state.convoNotificationSound,
     rpNotificationSound: state.rpNotificationSound,
     customConversationPrompt: state.customConversationPrompt,
     scheduleGenerationPreferences: state.scheduleGenerationPreferences,
+    learnedGameSetupOptions: state.learnedGameSetupOptions,
   };
 }
 
@@ -398,8 +491,16 @@ export const useUIStore = create<UIState>()(
       streamingSpeed: 50,
       gameInstantTextReveal: false,
       gameMiddleMouseNav: false,
+      gameDialogueDisplayMode: "classic" as GameDialogueDisplayMode,
       gameTextSpeed: 50,
       gameAutoPlayDelay: 3000,
+      reviewImagePromptsBeforeSend: false,
+      imageBackgroundWidth: 1024,
+      imageBackgroundHeight: 576,
+      imagePortraitWidth: 512,
+      imagePortraitHeight: 512,
+      imageSelfieWidth: 512,
+      imageSelfieHeight: 768,
 
       messageGrouping: true,
       showTimestamps: false,
@@ -410,6 +511,10 @@ export const useUIStore = create<UIState>()(
       confirmBeforeDelete: true,
       messagesPerPage: 20,
       boldDialogue: true,
+      trimIncompleteModelOutput: false,
+      speechToTextEnabled: false,
+      intuitiveSwipeNavigation: false,
+      intuitiveSwipeRerollLatest: false,
       narrationFontColor: "",
       narrationOpacity: 80,
       chatFontColor: "",
@@ -419,12 +524,15 @@ export const useUIStore = create<UIState>()(
       textStrokeWidth: 0.5,
       textStrokeColor: "#000000",
       visualTheme: "default" as VisualTheme,
-      convoGradientFrom: "#0a0a0e",
-      convoGradientTo: "#1c2133",
+      convoGradient: {
+        dark: { from: "#0a0a0e", to: "#1c2133" },
+        light: { from: "#f2eff7", to: "#eae6f0" },
+      },
       convoNotificationSound: true,
       rpNotificationSound: true,
       customConversationPrompt: null,
       scheduleGenerationPreferences: "",
+      learnedGameSetupOptions: DEFAULT_GAME_SETUP_LEARNED_OPTIONS,
       enterToSendRP: false,
       enterToSendConvo: true,
       enterToSendGame: true,
@@ -441,6 +549,7 @@ export const useUIStore = create<UIState>()(
       echoChamberSide: "bottom-right" as EchoChamberSide,
       userStatusManual: "active" as const,
       userStatus: "active" as UserStatus,
+      userActivity: "",
       centerCompact: false,
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -644,8 +753,25 @@ export const useUIStore = create<UIState>()(
       setStreamingSpeed: (v) => set({ streamingSpeed: Math.max(1, Math.min(100, v)) }),
       setGameInstantTextReveal: (v) => set({ gameInstantTextReveal: v }),
       setGameMiddleMouseNav: (v) => set({ gameMiddleMouseNav: v }),
+      setGameDialogueDisplayMode: (v) => set({ gameDialogueDisplayMode: v }),
       setGameTextSpeed: (v) => set({ gameTextSpeed: Math.max(1, Math.min(100, v)) }),
       setGameAutoPlayDelay: (v) => set({ gameAutoPlayDelay: Math.max(200, Math.min(10000, Math.round(v))) }),
+      setReviewImagePromptsBeforeSend: (v) => set({ reviewImagePromptsBeforeSend: v }),
+      setImageBackgroundDimensions: (width, height) =>
+        set({
+          imageBackgroundWidth: clampImageDimension(width),
+          imageBackgroundHeight: clampImageDimension(height),
+        }),
+      setImagePortraitDimensions: (width, height) =>
+        set({
+          imagePortraitWidth: clampImageDimension(width),
+          imagePortraitHeight: clampImageDimension(height),
+        }),
+      setImageSelfieDimensions: (width, height) =>
+        set({
+          imageSelfieWidth: clampImageDimension(width),
+          imageSelfieHeight: clampImageDimension(height),
+        }),
 
       setMessageGrouping: (v) => set({ messageGrouping: v }),
       setShowTimestamps: (v) => set({ showTimestamps: v }),
@@ -656,6 +782,10 @@ export const useUIStore = create<UIState>()(
       setConfirmBeforeDelete: (v) => set({ confirmBeforeDelete: v }),
       setMessagesPerPage: (n) => set({ messagesPerPage: n }),
       setBoldDialogue: (v) => set({ boldDialogue: v }),
+      setTrimIncompleteModelOutput: (v) => set({ trimIncompleteModelOutput: v }),
+      setSpeechToTextEnabled: (v) => set({ speechToTextEnabled: v }),
+      setIntuitiveSwipeNavigation: (v) => set({ intuitiveSwipeNavigation: v }),
+      setIntuitiveSwipeRerollLatest: (v) => set({ intuitiveSwipeRerollLatest: v }),
       setNarrationFontColor: (v) => set({ narrationFontColor: v }),
       setNarrationOpacity: (v) => set({ narrationOpacity: Math.max(0, Math.min(100, v)) }),
       setChatFontColor: (v) => set({ chatFontColor: v }),
@@ -666,12 +796,29 @@ export const useUIStore = create<UIState>()(
       setTextStrokeColor: (v) => set({ textStrokeColor: v }),
       setCenterCompact: (v) => set({ centerCompact: v }),
       setVisualTheme: (v) => set({ visualTheme: v }),
-      setConvoGradientFrom: (v) => set({ convoGradientFrom: v }),
-      setConvoGradientTo: (v) => set({ convoGradientTo: v }),
+      setConvoGradientField: (scheme, field, value) =>
+        set((s) => ({
+          convoGradient: {
+            ...s.convoGradient,
+            [scheme]: { ...s.convoGradient[scheme], [field]: value },
+          },
+        })),
       setConvoNotificationSound: (v) => set({ convoNotificationSound: v }),
       setRpNotificationSound: (v) => set({ rpNotificationSound: v }),
       setCustomConversationPrompt: (v) => set({ customConversationPrompt: v }),
       setScheduleGenerationPreferences: (v) => set({ scheduleGenerationPreferences: v }),
+      rememberGameSetupOptions: (options) =>
+        set((state) => {
+          const learned = state.learnedGameSetupOptions ?? DEFAULT_GAME_SETUP_LEARNED_OPTIONS;
+          return {
+            learnedGameSetupOptions: {
+              genres: mergeLearnedGameSetupOptions(learned.genres, options.genres ?? []),
+              tones: mergeLearnedGameSetupOptions(learned.tones, options.tones ?? []),
+              settings: mergeLearnedGameSetupOptions(learned.settings, options.settings ?? []),
+              goals: mergeLearnedGameSetupOptions(learned.goals, options.goals ?? []),
+            },
+          };
+        }),
       setEnterToSendRP: (v) => set({ enterToSendRP: v }),
       setEnterToSendConvo: (v) => set({ enterToSendConvo: v }),
       setEnterToSendGame: (v) => set({ enterToSendGame: v }),
@@ -706,10 +853,11 @@ export const useUIStore = create<UIState>()(
       setEchoChamberSide: (side) => set({ echoChamberSide: side }),
       setUserStatus: (status) => set({ userStatus: status }),
       setUserStatusManual: (status) => set({ userStatusManual: status, userStatus: status }),
+      setUserActivity: (activity) => set({ userActivity: activity.slice(0, 120) }),
     }),
     {
       name: "marinara-engine-ui",
-      version: 10,
+      version: 17,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -815,6 +963,64 @@ export const useUIStore = create<UIState>()(
             persisted.gameAvatarScale = 1;
           }
         }
+        // v10 → v11: convert flat convoGradientFrom/To into per-scheme nested object.
+        if (version <= 10) {
+          if ("convoGradientFrom" in persisted || "convoGradientTo" in persisted) {
+            const oldFrom = persisted.convoGradientFrom ?? "#0a0a0e";
+            const oldTo = persisted.convoGradientTo ?? "#1c2133";
+            persisted.convoGradient = {
+              dark: { from: oldFrom, to: oldTo },
+              light: { from: "#f2eff7", to: "#eae6f0" },
+            };
+            delete persisted.convoGradientFrom;
+            delete persisted.convoGradientTo;
+          }
+        }
+        // v11 -> v12: add Game mode dialogue display layout.
+        if (version <= 11) {
+          if (persisted.gameDialogueDisplayMode === undefined) {
+            persisted.gameDialogueDisplayMode = "classic";
+          }
+        }
+        // v12 -> v13: image generation prompt review and default canvas sizes.
+        if (version <= 12) {
+          if (persisted.reviewImagePromptsBeforeSend === undefined) {
+            persisted.reviewImagePromptsBeforeSend = false;
+          }
+          if (persisted.imageBackgroundWidth === undefined) persisted.imageBackgroundWidth = 1024;
+          if (persisted.imageBackgroundHeight === undefined) persisted.imageBackgroundHeight = 576;
+          if (persisted.imagePortraitWidth === undefined) persisted.imagePortraitWidth = 512;
+          if (persisted.imagePortraitHeight === undefined) persisted.imagePortraitHeight = 512;
+          if (persisted.imageSelfieWidth === undefined) persisted.imageSelfieWidth = 512;
+          if (persisted.imageSelfieHeight === undefined) persisted.imageSelfieHeight = 768;
+        }
+        // v13 -> v14: add optional custom user activity text for Conversation status.
+        if (version <= 13) {
+          if (persisted.userActivity === undefined) {
+            persisted.userActivity = "";
+          }
+        }
+        // v14 -> v15: remember reusable custom Game setup options.
+        if (version <= 14) {
+          if (persisted.learnedGameSetupOptions === undefined) {
+            persisted.learnedGameSetupOptions = DEFAULT_GAME_SETUP_LEARNED_OPTIONS;
+          }
+        }
+        // v15 -> v16: opt-in output cleanup for incomplete final sentences.
+        if (version <= 15) {
+          if (persisted.trimIncompleteModelOutput === undefined) {
+            persisted.trimIncompleteModelOutput = false;
+          }
+        }
+        // v16 -> v17: opt-in intuitive swipe/reroll shortcuts.
+        if (version <= 16) {
+          if (persisted.intuitiveSwipeNavigation === undefined) {
+            persisted.intuitiveSwipeNavigation = false;
+          }
+          if (persisted.intuitiveSwipeRerollLatest === undefined) {
+            persisted.intuitiveSwipeRerollLatest = false;
+          }
+        }
         return persisted;
       },
       partialize: (state) => ({
@@ -832,8 +1038,16 @@ export const useUIStore = create<UIState>()(
         streamingSpeed: state.streamingSpeed,
         gameInstantTextReveal: state.gameInstantTextReveal,
         gameMiddleMouseNav: state.gameMiddleMouseNav,
+        gameDialogueDisplayMode: state.gameDialogueDisplayMode,
         gameTextSpeed: state.gameTextSpeed,
         gameAutoPlayDelay: state.gameAutoPlayDelay,
+        reviewImagePromptsBeforeSend: state.reviewImagePromptsBeforeSend,
+        imageBackgroundWidth: state.imageBackgroundWidth,
+        imageBackgroundHeight: state.imageBackgroundHeight,
+        imagePortraitWidth: state.imagePortraitWidth,
+        imagePortraitHeight: state.imagePortraitHeight,
+        imageSelfieWidth: state.imageSelfieWidth,
+        imageSelfieHeight: state.imageSelfieHeight,
 
         messageGrouping: state.messageGrouping,
         showTimestamps: state.showTimestamps,
@@ -844,6 +1058,10 @@ export const useUIStore = create<UIState>()(
         confirmBeforeDelete: state.confirmBeforeDelete,
         messagesPerPage: state.messagesPerPage,
         boldDialogue: state.boldDialogue,
+        trimIncompleteModelOutput: state.trimIncompleteModelOutput,
+        speechToTextEnabled: state.speechToTextEnabled,
+        intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
+        intuitiveSwipeRerollLatest: state.intuitiveSwipeRerollLatest,
         narrationFontColor: state.narrationFontColor,
         narrationOpacity: state.narrationOpacity,
         chatFontColor: state.chatFontColor,
@@ -853,8 +1071,7 @@ export const useUIStore = create<UIState>()(
         textStrokeWidth: state.textStrokeWidth,
         textStrokeColor: state.textStrokeColor,
         visualTheme: state.visualTheme,
-        convoGradientFrom: state.convoGradientFrom,
-        convoGradientTo: state.convoGradientTo,
+        convoGradient: state.convoGradient,
         enterToSendRP: state.enterToSendRP,
         enterToSendConvo: state.enterToSendConvo,
         enterToSendGame: state.enterToSendGame,
@@ -869,10 +1086,12 @@ export const useUIStore = create<UIState>()(
         echoChamberSide: state.echoChamberSide,
         userStatusManual: state.userStatusManual,
         userStatus: state.userStatus,
+        userActivity: state.userActivity,
         convoNotificationSound: state.convoNotificationSound,
         rpNotificationSound: state.rpNotificationSound,
         customConversationPrompt: state.customConversationPrompt,
         scheduleGenerationPreferences: state.scheduleGenerationPreferences,
+        learnedGameSetupOptions: state.learnedGameSetupOptions,
       }),
     },
   ),

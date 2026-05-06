@@ -19,6 +19,7 @@ import {
   useMoveOnMap,
   useConcludeSession,
   useRegenerateSessionConclusion,
+  useRegenerateSessionLorebook,
   useUpdateCampaignProgression,
   useStartSession,
   useGenerateMap,
@@ -30,12 +31,19 @@ import {
   useTransitionGameState,
   useRecruitPartyMember,
   useRemovePartyMember,
+  gameKeys,
 } from "../../hooks/use-game";
-import { useCreateMessage, useDeleteChat, useUpdateChatMetadata, useUpdateMessage } from "../../hooks/use-chats";
+import {
+  chatKeys,
+  useCreateMessage,
+  useDeleteChat,
+  useUpdateChatMetadata,
+  useUpdateMessage,
+} from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
-import { api } from "../../lib/api-client";
+import { api, getJsonRepairRequest, type JsonRepairRequest } from "../../lib/api-client";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { audioManager } from "../../lib/game-audio";
@@ -89,6 +97,12 @@ import { GameChoiceCards } from "./GameChoiceCards";
 import { GameQteOverlay } from "./GameQteOverlay";
 import { GameJournal } from "./GameJournal";
 import { GameCombatUI } from "./GameCombatUI";
+import { GameJsonRepairModal } from "./GameJsonRepairModal";
+import {
+  GameImagePromptReviewModal,
+  type GameImagePromptOverride,
+  type GameImagePromptReviewItem,
+} from "./GameImagePromptReviewModal";
 import { GameTutorial } from "./GameTutorial";
 import { DirectionEngine } from "./DirectionEngine";
 import { GameWidgetPanel, GameWidgetSessionPrepModal, MobileWidgetPanel } from "./GameWidgetPanel";
@@ -103,6 +117,91 @@ type JournalReadable = ReadableTag & {
   sourceMessageId?: string | null;
   sourceSegmentIndex?: number | null;
 };
+
+type GameAssetGenerationPayload = {
+  chatId: string;
+  backgroundTag?: string;
+  npcsNeedingAvatars?: Array<{ name: string; description: string }>;
+  illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
+  debugMode?: boolean;
+  imageSizes?: {
+    background?: { width: number; height: number };
+    portrait?: { width: number; height: number };
+    selfie?: { width: number; height: number };
+  };
+  promptOverrides?: GameImagePromptOverride[];
+};
+
+type GameAssetGenerationResult = {
+  generatedBackground: string | null;
+  generatedIllustration: { tag: string; segment?: number } | null;
+  generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
+};
+
+function getConfiguredGameAssetImageSizes(): NonNullable<GameAssetGenerationPayload["imageSizes"]> {
+  const settings = useUIStore.getState();
+  return {
+    background: { width: settings.imageBackgroundWidth, height: settings.imageBackgroundHeight },
+    portrait: { width: settings.imagePortraitWidth, height: settings.imagePortraitHeight },
+    selfie: { width: settings.imageSelfieWidth, height: settings.imageSelfieHeight },
+  };
+}
+
+type GameTimeMeta = {
+  day?: number;
+  hour?: number;
+  minute?: number;
+};
+
+function normalizeGameDay(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.max(1, Math.min(9999, Math.floor(parsed)));
+}
+
+function normalizeGameHour(value: unknown, fallback = 8): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(23, Math.floor(parsed)));
+}
+
+function normalizeGameMinute(value: unknown, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(59, Math.floor(parsed)));
+}
+
+function getGameTimeOfDayLabel(hour: number): string {
+  if (hour >= 5 && hour < 7) return "dawn";
+  if (hour >= 7 && hour < 12) return "morning";
+  if (hour >= 12 && hour < 17) return "afternoon";
+  if (hour >= 17 && hour < 20) return "evening";
+  if (hour >= 20) return "night";
+  return "midnight";
+}
+
+function formatGameTimeForHud(time: Required<GameTimeMeta>): string {
+  const h = String(time.hour).padStart(2, "0");
+  const m = String(time.minute).padStart(2, "0");
+  return `Day ${time.day}, ${h}:${m} (${getGameTimeOfDayLabel(time.hour)})`;
+}
+
+function parseGameDayFromTimeLabel(value?: string | null): number | null {
+  if (!value) return null;
+  const match = value.match(/\bday\s+(\d{1,4})\b/i);
+  if (!match) return null;
+  return normalizeGameDay(match[1]);
+}
+
+function parseHourMinuteFromTimeLabel(value?: string | null): { hour: number; minute: number } | null {
+  if (!value) return null;
+  const match = value.match(/\b(\d{1,2})[:.](\d{2})\b/);
+  if (!match) return null;
+  return {
+    hour: normalizeGameHour(match[1]),
+    minute: normalizeGameMinute(match[2]),
+  };
+}
 
 type SceneAssetPresentCharacter = {
   name?: string | null;
@@ -1262,6 +1361,9 @@ function getSceneBackgroundTags(assetKeys: string[]): string[] {
 }
 
 const RECENT_MUSIC_HISTORY_LIMIT = 8;
+const GAME_START_GENERATION_GUIDE =
+  "Begin the game now with the first visible GM VN narration/dialogue segment. This is an invisible startup trigger, not a player action. Do not mention a start command.";
+const SYNTHETIC_GAME_START_MESSAGE_RE = /^\s*\[start(?:\s+the)?\s+game\]\s*$/i;
 
 function normalizeRecentMusicHistory(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((tag): tag is string => typeof tag === "string" && tag.length > 0) : [];
@@ -1275,6 +1377,7 @@ function appendRecentMusic(history: string[], tag: string | null | undefined): s
 function formatCombatLogContent(message: Message): string {
   const content = message.content.trim();
   if (!content) return "";
+  if (message.role === "user" && SYNTHETIC_GAME_START_MESSAGE_RE.test(content)) return "";
   if (message.role === "assistant" || message.role === "narrator") {
     return parseGmTags(content).cleanContent || content;
   }
@@ -1430,23 +1533,20 @@ export function GameSurface({
 
   /** Build weather string from chatMeta.gameWeather if available. */
   const metaWeather = (chatMeta.gameWeather as { type?: string; temperature?: number } | undefined)?.type ?? null;
+  const gameTimeMeta = chatMeta.gameTime as GameTimeMeta | undefined;
+  const currentGameDay = useMemo(
+    () => normalizeGameDay(gameTimeMeta?.day ?? parseGameDayFromTimeLabel(gameSnapshot?.time) ?? 1),
+    [gameSnapshot?.time, gameTimeMeta?.day],
+  );
   const metaTime = useMemo(() => {
-    const gt = chatMeta.gameTime as { day?: number; hour?: number; minute?: number } | undefined;
+    const gt = gameTimeMeta;
     if (!gt || gt.hour == null) return null;
-    const tod =
-      gt.hour >= 5 && gt.hour < 7
-        ? "dawn"
-        : gt.hour >= 7 && gt.hour < 12
-          ? "morning"
-          : gt.hour >= 12 && gt.hour < 17
-            ? "afternoon"
-            : gt.hour >= 17 && gt.hour < 20
-              ? "evening"
-              : "night";
-    const h = String(gt.hour ?? 0).padStart(2, "0");
-    const m = String(gt.minute ?? 0).padStart(2, "0");
-    return `Day ${gt.day ?? 1}, ${h}:${m} (${tod})`;
-  }, [chatMeta.gameTime]);
+    return formatGameTimeForHud({
+      day: normalizeGameDay(gt.day),
+      hour: normalizeGameHour(gt.hour),
+      minute: normalizeGameMinute(gt.minute),
+    });
+  }, [gameTimeMeta]);
 
   // ── Fetch game state on mount (WeatherEffects needs weather/time from the DB) ──
   useEffect(() => {
@@ -1531,6 +1631,7 @@ export function GameSurface({
   const [mobileRetryMenuOpen, setMobileRetryMenuOpen] = useState(false);
   const [confirmEndSessionOpen, setConfirmEndSessionOpen] = useState(false);
   const [nextSessionRequest, setNextSessionRequest] = useState("");
+  const [jsonRepairRequest, setJsonRepairRequest] = useState<JsonRepairRequest | null>(null);
   const [prepareSessionWidgetsOpen, setPrepareSessionWidgetsOpen] = useState(false);
   const [savingSessionSummary, setSavingSessionSummary] = useState<number | null>(null);
   const [savingCurrentSessionSecrets, setSavingCurrentSessionSecrets] = useState(false);
@@ -1711,14 +1812,11 @@ export function GameSurface({
   const [sceneAnalysisFailed, setSceneAnalysisFailed] = useState(false);
   const [sceneStuckVisible, setSceneStuckVisible] = useState(false);
   const [generationFailed, setGenerationFailed] = useState(false);
-  const [pendingAssetGeneration, setPendingAssetGeneration] = useState<{
-    chatId: string;
-    backgroundTag?: string;
-    npcsNeedingAvatars?: Array<{ name: string; description: string }>;
-    illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
-    debugMode?: boolean;
-  } | null>(null);
+  const [pendingAssetGeneration, setPendingAssetGeneration] = useState<GameAssetGenerationPayload | null>(null);
   const [assetGenerationFailed, setAssetGenerationFailed] = useState(false);
+  const [imagePromptReviewItems, setImagePromptReviewItems] = useState<GameImagePromptReviewItem[]>([]);
+  const [imagePromptReviewSubmitting, setImagePromptReviewSubmitting] = useState(false);
+  const imagePromptReviewResolveRef = useRef<((overrides: GameImagePromptOverride[] | null) => void) | null>(null);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
   const [persistedGameAudioSettings] = useState(readPersistedGameAudioSettings);
@@ -1900,6 +1998,7 @@ export function GameSurface({
 
   const playDirections = useCallback((directions: DirectionCommand[]) => {
     if (directions.length === 0) return;
+    setDirectionsPlaying(true);
     setActiveDirections([]);
     window.setTimeout(() => setActiveDirections(directions), 0);
   }, []);
@@ -2731,7 +2830,7 @@ export function GameSurface({
     // Inline directions can come from the GM model; sidecar scene analysis can
     // also return cinematic directions for the fully generated turn.
     if (tags.directions.length > 0) {
-      setActiveDirections(tags.directions);
+      playDirections(tags.directions);
     }
 
     // Combat starts are declared by the GM with [state: combat]. Legacy
@@ -2976,6 +3075,8 @@ export function GameSurface({
       state: sceneAnalysisState,
       weather: gameSnapshot?.weather ?? null,
       timeOfDay: gameSnapshot?.time ?? null,
+      musicIntensity:
+        sceneAnalysisState === "combat" ? "intense" : sceneAnalysisState === "travel_rest" ? "calm" : null,
       currentMusic: useGameAssetStore.getState().currentMusic,
       recentMusic: recentMusicHistoryRef.current,
       availableMusic: musicTags,
@@ -3037,6 +3138,65 @@ export function GameSurface({
       });
     },
     [activeChatId, fetchManifest, queryClient],
+  );
+
+  const openImagePromptReview = useCallback((items: GameImagePromptReviewItem[]) => {
+    return new Promise<GameImagePromptOverride[] | null>((resolve) => {
+      imagePromptReviewResolveRef.current = resolve;
+      setImagePromptReviewSubmitting(false);
+      setImagePromptReviewItems(items);
+    });
+  }, []);
+
+  const closeImagePromptReview = useCallback((overrides: GameImagePromptOverride[] | null) => {
+    const resolve = imagePromptReviewResolveRef.current;
+    imagePromptReviewResolveRef.current = null;
+    setImagePromptReviewSubmitting(false);
+    setImagePromptReviewItems([]);
+    resolve?.(overrides);
+  }, []);
+
+  const runGameAssetGeneration = useCallback(
+    async (assetPayload: GameAssetGenerationPayload): Promise<GameAssetGenerationResult | null> => {
+      const payload: GameAssetGenerationPayload = {
+        ...assetPayload,
+        debugMode: useUIStore.getState().debugMode,
+        imageSizes: getConfiguredGameAssetImageSizes(),
+      };
+
+      if (useUIStore.getState().reviewImagePromptsBeforeSend) {
+        const preview = await api.post<{ items: GameImagePromptReviewItem[] }>(
+          "/game/generate-assets/preview",
+          payload,
+        );
+        if (preview.items.length > 0) {
+          const overrides = await openImagePromptReview(preview.items);
+          if (!overrides) return null;
+          setImagePromptReviewSubmitting(true);
+          payload.promptOverrides = overrides;
+        }
+      }
+
+      return api.post<GameAssetGenerationResult>("/game/generate-assets", payload);
+    },
+    [openImagePromptReview],
+  );
+
+  const applyGeneratedAssets = useCallback(
+    (res: GameAssetGenerationResult) => {
+      if (res.generatedBackground) {
+        fetchManifest().then(() => {
+          useGameAssetStore.getState().setCurrentBackground(res.generatedBackground!);
+        });
+      }
+      if (res.generatedIllustration) {
+        installGeneratedIllustration(res.generatedIllustration);
+      }
+      if (res.generatedNpcAvatars?.length) {
+        useGameModeStore.getState().patchNpcAvatars(res.generatedNpcAvatars);
+      }
+    },
+    [fetchManifest, installGeneratedIllustration],
   );
 
   function applySceneResult(result: import("@marinara-engine/shared").SceneAnalysis, msg: { id: string }) {
@@ -3186,25 +3346,10 @@ export function GameSurface({
         };
         setPendingAssetGeneration(assetPayload);
         setAssetGenerationFailed(false);
-        api
-          .post<{
-            generatedBackground: string | null;
-            generatedIllustration: { tag: string; segment?: number } | null;
-            generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
-          }>("/game/generate-assets", assetPayload)
+        runGameAssetGeneration(assetPayload)
           .then((res) => {
             setPendingAssetGeneration(null);
-            if (res.generatedBackground) {
-              fetchManifest().then(() => {
-                useGameAssetStore.getState().setCurrentBackground(res.generatedBackground!);
-              });
-            }
-            if (res.generatedIllustration) {
-              installGeneratedIllustration(res.generatedIllustration);
-            }
-            if (res.generatedNpcAvatars?.length) {
-              useGameModeStore.getState().patchNpcAvatars(res.generatedNpcAvatars);
-            }
+            if (res) applyGeneratedAssets(res);
             // Ungate narration after assets are ready
             sceneReadyMsgIdRef.current = msg.id;
             setSceneReadyTick((t) => t + 1);
@@ -3249,38 +3394,16 @@ export function GameSurface({
 
   /** Retry failed image/NPC avatar generation. */
   const requestAssetGeneration = useCallback(
-    async (
-      assetPayload: {
-        chatId: string;
-        backgroundTag?: string;
-        npcsNeedingAvatars?: Array<{ name: string; description: string }>;
-        illustration?: import("@marinara-engine/shared").SceneIllustrationRequest;
-        debugMode?: boolean;
-      },
-      options?: { showSuccessToast?: boolean },
-    ) => {
+    async (assetPayload: GameAssetGenerationPayload, options?: { showSuccessToast?: boolean }) => {
       setPendingAssetGeneration(assetPayload);
       setAssetGenerationFailed(false);
 
       try {
-        const res = await api.post<{
-          generatedBackground: string | null;
-          generatedIllustration: { tag: string; segment?: number } | null;
-          generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
-        }>("/game/generate-assets", { ...assetPayload, debugMode: useUIStore.getState().debugMode });
+        const res = await runGameAssetGeneration(assetPayload);
 
         setPendingAssetGeneration(null);
-        if (res.generatedBackground) {
-          fetchManifest().then(() => {
-            useGameAssetStore.getState().setCurrentBackground(res.generatedBackground!);
-          });
-        }
-        if (res.generatedIllustration) {
-          installGeneratedIllustration(res.generatedIllustration);
-        }
-        if (res.generatedNpcAvatars?.length) {
-          useGameModeStore.getState().patchNpcAvatars(res.generatedNpcAvatars);
-        }
+        if (!res) return null;
+        applyGeneratedAssets(res);
         if (
           options?.showSuccessToast &&
           (res.generatedBackground || res.generatedIllustration || res.generatedNpcAvatars?.length)
@@ -3294,7 +3417,7 @@ export function GameSurface({
         return null;
       }
     },
-    [fetchManifest, installGeneratedIllustration],
+    [applyGeneratedAssets, runGameAssetGeneration],
   );
 
   const retryAssetGeneration = useCallback(
@@ -3395,6 +3518,7 @@ export function GameSurface({
     }
     introPlayedRef.current = true;
     setIntroCinematicActive(true);
+    setDirectionsPlaying(true);
     setActiveDirections(blueprint.introSequence);
   }, [blueprint, latestAssistantMsg?.content]);
 
@@ -3436,6 +3560,14 @@ export function GameSurface({
   const retryGeneration = useCallback(() => {
     setGenerationFailed(false);
     generate({ chatId: activeChatId, connectionId: null });
+  }, [activeChatId, generate]);
+
+  const generateInitialGameTurn = useCallback(() => {
+    generate({
+      chatId: activeChatId,
+      connectionId: null,
+      generationGuide: GAME_START_GENERATION_GUIDE,
+    });
   }, [activeChatId, generate]);
 
   const handleRetryTurn = useCallback(async () => {
@@ -3504,6 +3636,7 @@ export function GameSurface({
   const moveOnMap = useMoveOnMap();
   const concludeSession = useConcludeSession();
   const regenerateSessionConclusion = useRegenerateSessionConclusion();
+  const regenerateSessionLorebook = useRegenerateSessionLorebook();
   const updateCampaignProgression = useUpdateCampaignProgression();
   const startSession = useStartSession();
   const generateMap = useGenerateMap();
@@ -3513,6 +3646,84 @@ export function GameSurface({
   const updateMessage = useUpdateMessage(activeChatId);
   const startSessionLocked = startSession.isPending || startSessionRequested;
   const maxInventorySlots = 20;
+  const gameId = (chatMeta.gameId as string) || null;
+
+  const handleJsonRepairError = useCallback((error: unknown) => {
+    const request = getJsonRepairRequest(error);
+    if (!request) return false;
+    setJsonRepairRequest(request);
+    return true;
+  }, []);
+
+  const handleGameDayChange = useCallback(
+    async (day: number) => {
+      if (!activeChatId) return;
+
+      const snapshot = useGameStateStore.getState().current;
+      const parsedSnapshotTime = parseHourMinuteFromTimeLabel(snapshot?.chatId === activeChatId ? snapshot.time : null);
+      const nextTime = {
+        day: normalizeGameDay(day),
+        hour: normalizeGameHour(gameTimeMeta?.hour, parsedSnapshotTime?.hour ?? 8),
+        minute: normalizeGameMinute(gameTimeMeta?.minute, parsedSnapshotTime?.minute ?? 0),
+      };
+      const formattedTime = formatGameTimeForHud(nextTime);
+
+      try {
+        await updateChatMetadata.mutateAsync({
+          id: activeChatId,
+          gameTime: nextTime,
+        });
+
+        if (snapshot?.chatId === activeChatId) {
+          useGameStateStore.getState().setGameState({
+            ...snapshot,
+            time: formattedTime,
+          });
+        }
+        api.patch(`/chats/${activeChatId}/game-state`, { time: formattedTime }).catch(() => {});
+        toast.success(`Set game day to ${nextTime.day}.`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to update game day.");
+      }
+    },
+    [activeChatId, gameTimeMeta?.hour, gameTimeMeta?.minute, updateChatMetadata],
+  );
+
+  const handleJsonRepairApplied = useCallback(
+    (result: unknown, request: JsonRepairRequest) => {
+      const response = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      const responseChat =
+        response.sessionChat && typeof response.sessionChat === "object" ? (response.sessionChat as Chat) : null;
+      const responseGameId = typeof response.gameId === "string" ? response.gameId : gameId;
+      const bodyChatId =
+        request.applyBody && typeof request.applyBody.chatId === "string" ? request.applyBody.chatId : activeChatId;
+      const targetChatId = responseChat?.id ?? bodyChatId;
+
+      if (responseChat) {
+        queryClient.setQueryData(chatKeys.detail(responseChat.id), responseChat);
+        if (useChatStore.getState().activeChatId === responseChat.id) {
+          useChatStore.getState().setActiveChat(responseChat);
+        }
+      }
+      if (targetChatId) {
+        queryClient.invalidateQueries({ queryKey: chatKeys.detail(targetChatId) });
+        queryClient.invalidateQueries({ queryKey: chatKeys.messages(targetChatId) });
+      }
+      queryClient.invalidateQueries({ queryKey: chatKeys.list() });
+      if (responseGameId) {
+        queryClient.invalidateQueries({ queryKey: gameKeys.sessions(responseGameId) });
+      }
+
+      if (request.kind === "game_setup") {
+        useGameModeStore.getState().setSetupActive(false);
+      }
+      if (request.kind === "session_conclusion") {
+        setConfirmEndSessionOpen(false);
+      }
+      setJsonRepairRequest(null);
+    },
+    [activeChatId, gameId, queryClient],
+  );
 
   const handleNpcPortraitClick = useCallback(
     (npcName: string) => {
@@ -4324,29 +4535,7 @@ export function GameSurface({
                 : undefined,
             debugMode: useUIStore.getState().debugMode,
           };
-          setPendingAssetGeneration(assetPayload);
-          setAssetGenerationFailed(false);
-          api
-            .post<{
-              generatedBackground: string | null;
-              generatedIllustration: { tag: string; segment?: number } | null;
-              generatedNpcAvatars: Array<{ name: string; avatarUrl: string }>;
-            }>("/game/generate-assets", assetPayload)
-            .then((res) => {
-              setPendingAssetGeneration(null);
-              if (res.generatedBackground) {
-                fetchManifest().then(() => {
-                  useGameAssetStore.getState().setCurrentBackground(res.generatedBackground!);
-                });
-              }
-              if (res.generatedIllustration) {
-                installGeneratedIllustration(res.generatedIllustration);
-              }
-            })
-            .catch(() => {
-              setPendingAssetGeneration(null);
-              setAssetGenerationFailed(true);
-            });
+          void requestAssetGeneration(assetPayload);
         }
 
         setCombatParty(combatants.party);
@@ -4374,9 +4563,7 @@ export function GameSurface({
     combatUiActive,
     directionsPlaying,
     chatMeta.enableSpriteGeneration,
-    fetchManifest,
     hydrateGeneratedCombatState,
-    installGeneratedIllustration,
     isStreaming,
     latestAssistantMsg?.id,
     latestNarrationText,
@@ -4384,6 +4571,7 @@ export function GameSurface({
     pendingAssetGeneration,
     pendingEncounter,
     queuedCombatGeneration,
+    requestAssetGeneration,
     scenePreparing,
     transitionGameState,
   ]);
@@ -4476,7 +4664,10 @@ export function GameSurface({
     };
 
     const gameCardByName = new Map<string, StoredGameCard>();
-    for (const card of ((chatMeta.gameCharacterCards as Array<Record<string, unknown>>) ?? []) as StoredGameCard[]) {
+    const gameCharacterCards = Array.isArray(chatMeta.gameCharacterCards)
+      ? (chatMeta.gameCharacterCards as Array<Record<string, unknown>>)
+      : [];
+    for (const card of gameCharacterCards as StoredGameCard[]) {
       if (typeof card?.name === "string" && card.name.trim()) {
         gameCardByName.set(card.name.trim().toLowerCase(), card);
       }
@@ -4696,7 +4887,9 @@ export function GameSurface({
     > = {};
 
     // Game character cards from setup, matched leniently so aliases still reuse saved sheets.
-    const gameCharCards = (chatMeta.gameCharacterCards as Array<Record<string, unknown>>) ?? [];
+    const gameCharCards = Array.isArray(chatMeta.gameCharacterCards)
+      ? (chatMeta.gameCharacterCards as Array<Record<string, unknown>>)
+      : [];
     const findGameCard = (name: string) =>
       findNamedEntry(gameCharCards, name, (card) => (typeof card.name === "string" ? card.name : null));
 
@@ -4838,7 +5031,9 @@ export function GameSurface({
       const normalizedTitle = cardTitle.trim();
       if (!normalizedTitle) return;
 
-      const currentCards = (chatMeta.gameCharacterCards as Array<Record<string, unknown>>) ?? [];
+      const currentCards = Array.isArray(chatMeta.gameCharacterCards)
+        ? (chatMeta.gameCharacterCards as Array<Record<string, unknown>>)
+        : [];
       const currentIndex = currentCards.findIndex(
         (entry) => typeof entry.name === "string" && entry.name.toLowerCase() === normalizedTitle.toLowerCase(),
       );
@@ -4943,8 +5138,9 @@ export function GameSurface({
     },
     [combatEnemies, combatParty, isStreaming, sendMessage, sessionInteractive],
   );
-  const gameId = (chatMeta.gameId as string) || null;
-  const sessionSummaries = (chatMeta.gamePreviousSessionSummaries as SessionSummary[]) || [];
+  const sessionSummaries = Array.isArray(chatMeta.gamePreviousSessionSummaries)
+    ? (chatMeta.gamePreviousSessionSummaries as SessionSummary[])
+    : [];
   const displaySessionNumber =
     sessionStatus === "concluded" ? Math.max(sessionSummaries.length, 1) : sessionSummaries.length + 1;
   const currentSessionSecrets = useMemo<CurrentSessionSecrets>(
@@ -5060,17 +5256,35 @@ export function GameSurface({
   const handleRegenerateSessionConclusion = useCallback(
     async (sessionNumber: number) => {
       if (!activeChatId) return;
-      await regenerateSessionConclusion.mutateAsync({ chatId: activeChatId, sessionNumber });
+      try {
+        await regenerateSessionConclusion.mutateAsync({ chatId: activeChatId, sessionNumber });
+      } catch (error) {
+        if (handleJsonRepairError(error)) return;
+        throw error;
+      }
     },
-    [activeChatId, regenerateSessionConclusion],
+    [activeChatId, handleJsonRepairError, regenerateSessionConclusion],
+  );
+
+  const handleRegenerateSessionLorebook = useCallback(
+    async (sessionNumber: number) => {
+      if (!activeChatId) return;
+      await regenerateSessionLorebook.mutateAsync({ chatId: activeChatId, sessionNumber });
+    },
+    [activeChatId, regenerateSessionLorebook],
   );
 
   const handleUpdateCampaignProgression = useCallback(
     async (sessionNumber: number) => {
       if (!activeChatId) return;
-      await updateCampaignProgression.mutateAsync({ chatId: activeChatId, sessionNumber });
+      try {
+        await updateCampaignProgression.mutateAsync({ chatId: activeChatId, sessionNumber });
+      } catch (error) {
+        if (handleJsonRepairError(error)) return;
+        throw error;
+      }
     },
-    [activeChatId, updateCampaignProgression],
+    [activeChatId, handleJsonRepairError, updateCampaignProgression],
   );
 
   const handleRollDice = useCallback(
@@ -5269,8 +5483,11 @@ export function GameSurface({
   const handleConcludeSession = useCallback(() => {
     if (concludeSession.isPending) return;
     const trimmedRequest = nextSessionRequest.trim();
-    concludeSession.mutate({ chatId: activeChatId, ...(trimmedRequest ? { nextSessionRequest: trimmedRequest } : {}) });
-  }, [activeChatId, concludeSession, nextSessionRequest]);
+    concludeSession.mutate(
+      { chatId: activeChatId, ...(trimmedRequest ? { nextSessionRequest: trimmedRequest } : {}) },
+      { onError: handleJsonRepairError },
+    );
+  }, [activeChatId, concludeSession, handleJsonRepairError, nextSessionRequest]);
 
   const handleRequestEndSession = useCallback(() => {
     if (concludeSession.isPending) return;
@@ -5758,42 +5975,55 @@ export function GameSurface({
   // Setup wizard — show when explicitly active, when game needs creation, or when status is still "setup" (e.g. previous setup failed)
   if (isSetupActive || needsCreation || sessionStatus === "setup") {
     return (
-      <GameSetupWizard
-        onComplete={(config, preferences, conns, wizardGameName) => {
-          if (needsCreation) {
-            // Create game structure first, then run setup
-            createGame.mutate(
-              {
-                name: wizardGameName || chat?.name || "New Game",
-                setupConfig: config,
-                chatId: activeChatId,
-                connectionId: conns.gmConnectionId,
-              },
-              {
-                onSuccess: (res) => {
-                  gameSetup.mutate({
-                    chatId: res.sessionChat.id,
-                    connectionId: conns.gmConnectionId,
-                    preferences,
-                  });
+      <>
+        <GameSetupWizard
+          onComplete={(config, preferences, conns, wizardGameName) => {
+            if (needsCreation) {
+              // Create game structure first, then run setup
+              createGame.mutate(
+                {
+                  name: wizardGameName || chat?.name || "New Game",
+                  setupConfig: config,
+                  chatId: activeChatId,
+                  connectionId: conns.gmConnectionId,
                 },
-              },
-            );
-          } else {
-            gameSetup.mutate({ chatId: activeChatId, connectionId: conns.gmConnectionId, preferences });
-          }
-        }}
-        onCancel={() => {
-          if (needsCreation || sessionStatus === "setup") {
-            // Delete the broken/empty game chat
-            useChatStore.getState().setActiveChatId(null);
-            deleteChat.mutate(activeChatId);
-          }
-          useGameModeStore.getState().setSetupActive(false);
-        }}
-        isLoading={createGame.isPending || gameSetup.isPending}
-        characters={characters}
-      />
+                {
+                  onSuccess: (res) => {
+                    gameSetup.mutate(
+                      {
+                        chatId: res.sessionChat.id,
+                        connectionId: conns.gmConnectionId,
+                        preferences,
+                      },
+                      { onError: handleJsonRepairError },
+                    );
+                  },
+                },
+              );
+            } else {
+              gameSetup.mutate(
+                { chatId: activeChatId, connectionId: conns.gmConnectionId, preferences },
+                { onError: handleJsonRepairError },
+              );
+            }
+          }}
+          onCancel={() => {
+            if (needsCreation || sessionStatus === "setup") {
+              // Delete the broken/empty game chat
+              useChatStore.getState().setActiveChatId(null);
+              deleteChat.mutate(activeChatId);
+            }
+            useGameModeStore.getState().setSetupActive(false);
+          }}
+          isLoading={createGame.isPending || gameSetup.isPending}
+          characters={characters}
+        />
+        <GameJsonRepairModal
+          request={jsonRepairRequest}
+          onClose={() => setJsonRepairRequest(null)}
+          onApplied={handleJsonRepairApplied}
+        />
+      </>
     );
   }
 
@@ -5902,10 +6132,7 @@ export function GameSurface({
                 )}
                 {/* Show retry when generation stopped but no content arrived. */}
                 {!isStreaming && !latestAssistantMsg?.content && !startGame.isPending && (
-                  <button
-                    onClick={() => generate({ chatId: activeChatId, connectionId: null })}
-                    className={SURFACE_BTN}
-                  >
+                  <button onClick={generateInitialGameTurn} className={SURFACE_BTN}>
                     <RefreshCw size={14} />
                     Retry
                   </button>
@@ -5923,8 +6150,8 @@ export function GameSurface({
                     {
                       onSuccess: (res) => {
                         console.log("[GameSurface] startGame succeeded:", res);
-                        sendMessage("[Start the game]");
-                        console.log("[GameSurface] sendMessage called");
+                        generateInitialGameTurn();
+                        console.log("[GameSurface] initial game turn generation requested");
                       },
                       onError: (err) => {
                         startGameGuardRef.current = false;
@@ -6322,6 +6549,8 @@ export function GameSurface({
                       disabled={isStreaming || !narrationDone || !sessionInteractive}
                       gameState={gameState}
                       timeOfDay={gameSnapshot?.time ?? metaTime ?? null}
+                      day={currentGameDay}
+                      onDayChange={handleGameDayChange}
                     />
                   </div>
                   {/* Desktop: inline minimap */}
@@ -6338,6 +6567,8 @@ export function GameSurface({
                       disabled={isStreaming || !narrationDone || !sessionInteractive}
                       gameState={gameState}
                       timeOfDay={gameSnapshot?.time ?? metaTime ?? null}
+                      day={currentGameDay}
+                      onDayChange={handleGameDayChange}
                       chatId={activeChatId}
                       constraintsRef={hudSurfaceRef}
                     />
@@ -6701,6 +6932,25 @@ export function GameSurface({
                         ? (regenerateSessionConclusion.variables?.sessionNumber ?? null)
                         : null
                     }
+                    lorebookKeeperEnabled={chatMeta.gameLorebookKeeperEnabled === true}
+                    lorebookKeeperLastRun={
+                      chatMeta.gameLorebookKeeperLastRun &&
+                      typeof chatMeta.gameLorebookKeeperLastRun === "object" &&
+                      !Array.isArray(chatMeta.gameLorebookKeeperLastRun)
+                        ? (chatMeta.gameLorebookKeeperLastRun as {
+                            sessionNumber: number;
+                            status: "running" | "success" | "failed";
+                            updatedAt: string;
+                            entryCount?: number;
+                            error?: string;
+                          })
+                        : null
+                    }
+                    regeneratingLorebookSessionNumber={
+                      regenerateSessionLorebook.isPending
+                        ? (regenerateSessionLorebook.variables?.sessionNumber ?? null)
+                        : null
+                    }
                     updatingPlotArcsSessionNumber={
                       updateCampaignProgression.isPending
                         ? (updateCampaignProgression.variables?.sessionNumber ?? null)
@@ -6709,6 +6959,7 @@ export function GameSurface({
                     onSaveCurrentSecrets={handleSaveCurrentSessionSecrets}
                     onSaveSession={handleSaveSessionDetails}
                     onRegenerateSession={handleRegenerateSessionConclusion}
+                    onRegenerateLorebook={handleRegenerateSessionLorebook}
                     onUpdatePlotArcs={handleUpdateCampaignProgression}
                     onClose={() => setHistoryOpen(false)}
                   />
@@ -6922,6 +7173,14 @@ export function GameSurface({
         />
       )}
 
+      <GameImagePromptReviewModal
+        open={imagePromptReviewItems.length > 0}
+        items={imagePromptReviewItems}
+        isSubmitting={imagePromptReviewSubmitting}
+        onCancel={() => closeImagePromptReview(null)}
+        onConfirm={(overrides) => closeImagePromptReview(overrides)}
+      />
+
       <Modal open={interruptModalOpen} onClose={closeInterruptModal} title="Attempt to Interrupt?" width="max-w-md">
         <div className="flex flex-col gap-4">
           <div className="flex items-start gap-3">
@@ -7031,6 +7290,12 @@ export function GameSurface({
         onClose={() => setPrepareSessionWidgetsOpen(false)}
         onStartSession={handleStartNewSessionNow}
         isStartingSession={startSessionLocked}
+      />
+
+      <GameJsonRepairModal
+        request={jsonRepairRequest}
+        onClose={() => setJsonRepairRequest(null)}
+        onApplied={handleJsonRepairApplied}
       />
     </div>
   );

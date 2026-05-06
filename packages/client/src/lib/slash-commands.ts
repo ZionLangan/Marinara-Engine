@@ -105,6 +105,9 @@ function buildMacroHelpText(): string {
     ...Array.from(sections.entries()).flatMap(([category, lines], index) =>
       index === 0 ? ["", `${category}:`, ...lines] : ["", `${category}:`, ...lines],
     ),
+    "",
+    "Input Actions:",
+    "{{prompt}} - Open the prompt preview for the current chat without sending a message",
   ].join("\n");
 }
 

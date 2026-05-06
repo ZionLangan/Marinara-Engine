@@ -20,6 +20,10 @@ export const createRegexScriptSchema = z.object({
 });
 
 export const updateRegexScriptSchema = createRegexScriptSchema.partial();
+export const reorderRegexScriptsSchema = z.object({
+  scriptIds: z.array(z.string().min(1)),
+});
 
 export type CreateRegexScriptInput = z.infer<typeof createRegexScriptSchema>;
 export type UpdateRegexScriptInput = z.infer<typeof updateRegexScriptSchema>;
+export type ReorderRegexScriptsInput = z.infer<typeof reorderRegexScriptsSchema>;

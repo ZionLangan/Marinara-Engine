@@ -12,6 +12,7 @@ export const apiProviderSchema = z.enum([
   "cohere",
   "openrouter",
   "nanogpt",
+  "xai",
   "custom",
   "image_generation",
 ]);

@@ -7,7 +7,14 @@
 // widgets, expressions, weather, etc.).
 // ──────────────────────────────────────────────
 
-import type { HudWidget, GameNpc, GameActiveState } from "@marinara-engine/shared";
+import {
+  LOCATION_KINDS,
+  MUSIC_GENRES,
+  MUSIC_INTENSITIES,
+  type HudWidget,
+  type GameNpc,
+  type GameActiveState,
+} from "@marinara-engine/shared";
 
 export interface SceneAnalyzerContext {
   /** Current game state before this turn. */
@@ -47,7 +54,7 @@ export interface SceneAnalyzerContext {
 /** Build the system prompt for scene analysis — kept minimal so all token
  *  budget goes to the user message where the actual choices live. */
 export function buildSceneAnalyzerSystemPrompt(_ctx: SceneAnalyzerContext): string {
-  return `You are a game state analyzer. Read the narration, then fill in the JSON template using ONLY the exact tags provided as options. Output valid JSON only.`;
+  return `You are a game state analyzer. Read the narration, then fill in the JSON template using ONLY the exact tags and enum values provided as options. Output valid JSON only.`;
 }
 
 function backgroundOptionKey(tag: string): string {
@@ -147,6 +154,9 @@ export function buildSceneAnalyzerUserPrompt(
   const parts: string[] = [];
   const canGenerateIllustrations = !!ctx?.canGenerateIllustrations;
   const canGenerateBackgrounds = !!ctx?.canGenerateBackgrounds;
+  const musicGenreOptions = [...MUSIC_GENRES, "null"].join(" | ");
+  const musicIntensityOptions = [...MUSIC_INTENSITIES, "null"].join(" | ");
+  const locationKindOptions = [...LOCATION_KINDS, "null"].join(" | ");
 
   // ── 1. Narration (longest — furthest from generation) ──
 
@@ -175,27 +185,27 @@ export function buildSceneAnalyzerUserPrompt(
   parts.push(
     ``,
     `TASK: You are the scene director for a visual novel game. Read the narration above and decide:`,
-    // music and ambient are scored deterministically on the server — not requested from the model
     `1. SCENE SETTING — Pick the BEST overall background, weather, and time of day that fit the narration. The top-level "background" is the DEFAULT background for this turn. Change it from the current state only if the scene warrants it (new location, mood shift). Use null to keep unchanged.`,
-    `2. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
-    `3. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
+    `2. AUDIO DIRECTION — Choose compact musicGenre/musicIntensity/locationKind hints. Do NOT choose music or ambient file tags; Marinara maps these hints to assets deterministically.`,
+    `3. REPUTATION — If an NPC relationship shifted, note it. Otherwise empty array.`,
+    `4. PER-BEAT EFFECTS — Scan each narration beat [0]-[${lines.length - 1}]. For each beat you can optionally add:`,
     `   - "sfx": sound effects (door slam, explosion, footsteps, impact)`,
     `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal`,
     `   - "background": a DIFFERENT background tag if the characters move to a new location at that beat. The background stays the same until the NEXT segment that changes it, so only set "background" on the beat where characters actually arrive at a new location. Do NOT repeat the current background.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
     ...(canGenerateBackgrounds
       ? [
-          `4. GENERATED LOCATION BACKGROUNDS — If the narration enters a new location and none of the listed background tags fit, use backgrounds:generated:<short-location-slug>. This requests a normal reusable location background image.`,
+          `5. GENERATED LOCATION BACKGROUNDS — If the narration enters a new location and none of the listed background tags fit, use backgrounds:generated:<short-location-slug>. This requests a normal reusable location background image.`,
         ]
       : []),
     ...((ctx?.turnNumber ?? 1) > 1
       ? [
-          `${canGenerateBackgrounds ? "5" : "4"}. CINEMATIC DIRECTIONS — If the whole turn warrants an opening/establishing visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
+          `${canGenerateBackgrounds ? "6" : "5"}. CINEMATIC DIRECTIONS — If the whole turn warrants an opening/establishing visual effect, include it. Otherwise empty array. Available: fade_from_black, fade_to_black, flash, screen_shake, blur, vignette, letterbox, color_grade (presets: warm, cold_blue, horror, noir, vintage, neon, dreamy), focus, pulse, slow_zoom, impact_zoom, tilt, desaturate, chromatic_aberration, film_grain, rain_streaks, spotlight.`,
         ]
       : []),
     ...(canGenerateIllustrations
       ? [
-          `${(ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "6" : "5") : canGenerateBackgrounds ? "5" : "4"}. RARE SPECIAL-SCENE CG BACKGROUND — You may request ONE generated VN CG illustration only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
+          `${(ctx?.turnNumber ?? 1) > 1 ? (canGenerateBackgrounds ? "7" : "6") : canGenerateBackgrounds ? "6" : "5"}. RARE SPECIAL-SCENE CG BACKGROUND — You may request ONE generated VN CG illustration only for a major, story-defining moment: first kiss, duel climax, major revelation, sacrifice, council confrontation, boss entrance, or emotional peak. Do not request one for routine travel, normal dialogue, regular combat blows, room changes, shopping, exposition, or scenery.`,
           `   The image must be from the player protagonist's POV, in the game's established art style${ctx?.artStylePrompt ? ` (${ctx.artStylePrompt})` : ""}. The protagonist should not be visible except hands/arms when the narration explicitly requires it.`,
         ]
       : []),
@@ -203,6 +213,8 @@ export function buildSceneAnalyzerUserPrompt(
     `RULES:`,
     `- Use ONLY the exact tags listed in the template below. If backgrounds:generated:<short-location-slug> is listed, replace <short-location-slug> with a short concrete location slug.`,
     `- Expressions and widget updates are handled by the GM model. Do NOT include them in your output.`,
+    `- musicGenre describes scene genre/vibe (fantasy, horror, romance, etc.), not weather. musicIntensity is calm for safe/rest/romance, tense for uncertainty/suspense, intense for combat/chase/climax.`,
+    `- locationKind describes the physical space for ambience: interior, exterior, underground, urban, or nature. Use null if unclear.`,
     `- segmentEffects can be an EMPTY array [] when nothing changed.`,
     `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
@@ -231,7 +243,8 @@ export function buildSceneAnalyzerUserPrompt(
   const backgroundOptions = buildBackgroundOptions(ctx);
   const bgOptions = backgroundOptions.length ? backgroundOptions.join(" | ") : "null";
 
-  // Ambient — handled automatically by scoreAmbient(), excluded from prompt
+  // Music/ambient file tags are handled automatically by scoreMusic()/scoreAmbient().
+  // The prompt only asks for compact audio direction fields.
 
   // NPC names for reputation
   const npcNames = ctx?.trackedNpcs?.length ? ctx.trackedNpcs.map((n) => n.name) : [];
@@ -261,6 +274,9 @@ export function buildSceneAnalyzerUserPrompt(
     `  "background": "<one BACKGROUND OPTIONS value | null>",`,
     `  "weather": "<clear | cloudy | foggy | rainy | stormy | snowy | windy | frost | null>",`,
     `  "timeOfDay": "<dawn | morning | noon | afternoon | evening | night | midnight | null>",`,
+    `  "musicGenre": "<${musicGenreOptions}>",`,
+    `  "musicIntensity": "<${musicIntensityOptions}>",`,
+    `  "locationKind": "<${locationKindOptions}>",`,
     `  "reputationChanges": ${reputationHint},`,
     `  "segmentEffects": [`,
     `    {`,

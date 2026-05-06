@@ -33,6 +33,7 @@ import { usePersonas } from "../../hooks/use-characters";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { useLorebooks } from "../../hooks/use-lorebooks";
 import { useGameAssetStore } from "../../stores/game-asset.store";
+import { useUIStore } from "../../stores/ui.store";
 
 interface GameSetupWizardProps {
   onComplete: (
@@ -96,6 +97,7 @@ function getPersonaTitle(persona: PersonaDisplayInfo): string | null {
 const GENRES = ["Fantasy", "Sci-Fi", "Horror", "Modern", "Post-Apocalyptic", "Cyberpunk", "Steampunk", "Historical"];
 const TONES = ["Heroic", "Dark", "Comedic", "Gritty", "Whimsical", "Serious", "Campy"];
 const DIFFICULTIES = ["Casual", "Normal", "Hard", "Brutal"];
+const LEARNED_OPTION_PREVIEW_LIMIT = 8;
 
 const SETTING_SUGGESTIONS = [
   "Surprise me!",
@@ -110,6 +112,80 @@ const GOAL_SUGGESTIONS = [
   "Survive and uncover the truth",
   "Become the ruler of the land",
 ];
+
+type LearnedOptionGroup = "genres" | "tones" | "settings" | "goals";
+
+function optionKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function filterLearnedOptions(options: string[] | undefined, excluded: string[]) {
+  const excludedKeys = new Set(excluded.map(optionKey));
+  const seen = new Set<string>();
+  return (options ?? []).filter((option) => {
+    const trimmed = option.trim();
+    const key = optionKey(trimmed);
+    if (!trimmed || excludedKeys.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function filterCustomLearnedValues(values: string[], builtIns: string[]) {
+  const excluded = new Set([...builtIns, "Surprise me, go wild!"].map(optionKey));
+  return values.map((value) => value.trim()).filter((value) => value && !excluded.has(optionKey(value)));
+}
+
+function LearnedOptionChips({
+  options,
+  expanded,
+  onToggleExpanded,
+  onSelect,
+  selected,
+}: {
+  options: string[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onSelect: (value: string) => void;
+  selected?: (value: string) => boolean;
+}) {
+  if (options.length === 0) return null;
+
+  const visible = expanded ? options : options.slice(0, LEARNED_OPTION_PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, options.length - visible.length);
+
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {visible.map((option) => {
+        const isSelected = selected?.(option) ?? false;
+        return (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onSelect(option)}
+            className={cn(
+              "rounded-full px-2 py-0.5 text-[0.625rem] transition-colors",
+              isSelected
+                ? "bg-[var(--primary)]/20 text-[var(--primary)] ring-1 ring-[var(--primary)]/35"
+                : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--primary)]/10 hover:text-[var(--primary)]",
+            )}
+          >
+            {option}
+          </button>
+        );
+      })}
+      {(hiddenCount > 0 || expanded) && (
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
+        >
+          {expanded ? "Show less" : `+${hiddenCount} more`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 type GameLanguageOption = {
   label: string;
@@ -181,9 +257,17 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   const [enableCustomWidgets, setEnableCustomWidgets] = useState(true);
   const [language, setLanguage] = useState("English");
   const [startMuted, setStartMuted] = useState(false);
+  const [expandedLearnedOptions, setExpandedLearnedOptions] = useState<Record<LearnedOptionGroup, boolean>>({
+    genres: false,
+    tones: false,
+    settings: false,
+    goals: false,
+  });
 
   const sidecarStatus = useSidecarStore((s) => s.status);
   const sidecarConfig = useSidecarStore((s) => s.config);
+  const learnedGameSetupOptions = useUIStore((s) => s.learnedGameSetupOptions);
+  const rememberGameSetupOptions = useUIStore((s) => s.rememberGameSetupOptions);
   const sidecarAvailable = !!sidecarConfig.modelPath && sidecarStatus !== "not_downloaded";
 
   // Fetch sidecar status on mount so the dropdown is populated without visiting Connections first
@@ -258,6 +342,26 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
   );
 
   const steps = ["Genre & Setting", "Party & GM", "You & Model", "Goals"];
+  const learnedGenres = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.genres, [...GENRES, ...genres]),
+    [genres, learnedGameSetupOptions?.genres],
+  );
+  const learnedTones = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.tones, [...TONES, ...tones]),
+    [learnedGameSetupOptions?.tones, tones],
+  );
+  const learnedSettings = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.settings, [...SETTING_SUGGESTIONS, setting]),
+    [learnedGameSetupOptions?.settings, setting],
+  );
+  const learnedGoals = useMemo(
+    () => filterLearnedOptions(learnedGameSetupOptions?.goals, [...GOAL_SUGGESTIONS, playerGoals]),
+    [learnedGameSetupOptions?.goals, playerGoals],
+  );
+
+  const toggleLearnedOptions = (group: LearnedOptionGroup) => {
+    setExpandedLearnedOptions((prev) => ({ ...prev, [group]: !prev[group] }));
+  };
 
   const toggleGenre = (g: string) => {
     setGenres((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
@@ -332,6 +436,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
     if (sidecarAvailable) {
       useSidecarStore.getState().updateConfig({ useForGameScene: sceneModelValue === "local" });
     }
+    rememberGameSetupOptions({
+      genres: filterCustomLearnedValues(genres, GENRES),
+      tones: filterCustomLearnedValues(tones, TONES),
+      settings: filterCustomLearnedValues(setting ? [setting] : [], SETTING_SUGGESTIONS),
+      goals: filterCustomLearnedValues(playerGoals ? [playerGoals] : [], GOAL_SUGGESTIONS),
+    });
     onComplete(
       {
         genre: genres.join(", ") || "Fantasy",
@@ -434,6 +544,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                     </button>
                   ))}
               </div>
+              <LearnedOptionChips
+                options={learnedGenres}
+                expanded={expandedLearnedOptions.genres}
+                onToggleExpanded={() => toggleLearnedOptions("genres")}
+                onSelect={toggleGenre}
+                selected={(value) => genres.includes(value)}
+              />
               <div className="mt-2 flex items-center gap-1.5">
                 <input
                   type="text"
@@ -475,6 +592,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                   </button>
                 ))}
               </div>
+              <LearnedOptionChips
+                options={learnedSettings}
+                expanded={expandedLearnedOptions.settings}
+                onToggleExpanded={() => toggleLearnedOptions("settings")}
+                onSelect={setSetting}
+              />
             </div>
 
             {/* Tone — multi-select */}
@@ -511,6 +634,13 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                     </button>
                   ))}
               </div>
+              <LearnedOptionChips
+                options={learnedTones}
+                expanded={expandedLearnedOptions.tones}
+                onToggleExpanded={() => toggleLearnedOptions("tones")}
+                onSelect={toggleTone}
+                selected={(value) => tones.includes(value)}
+              />
               <div className="mt-2 flex items-center gap-1.5">
                 <input
                   type="text"
@@ -1134,6 +1264,12 @@ export function GameSetupWizard({ onComplete, onCancel, isLoading, characters }:
                   </button>
                 ))}
               </div>
+              <LearnedOptionChips
+                options={learnedGoals}
+                expanded={expandedLearnedOptions.goals}
+                onToggleExpanded={() => toggleLearnedOptions("goals")}
+                onSelect={setPlayerGoals}
+              />
             </div>
 
             {/* Preferences */}

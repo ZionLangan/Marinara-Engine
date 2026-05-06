@@ -205,6 +205,10 @@ export function resolveMessageMacros(
   return resolveMacros(template, buildMessageMacroContext(context), { trimResult: false });
 }
 
+export function isPromptPreviewMacro(input: string): boolean {
+  return /^\{\{\s*(?:prompt|prompt_preview|preview_prompt)\s*\}\}$/i.test(input.trim());
+}
+
 export function resolveInputMacrosForChat(
   template: string,
   chat: { characterIds?: unknown; personaId?: string | null; mode?: string | null } | null | undefined,

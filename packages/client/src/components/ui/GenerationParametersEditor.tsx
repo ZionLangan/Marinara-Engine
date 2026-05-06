@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { GenerationParameters } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "./HelpTooltip";
@@ -13,6 +13,8 @@ export type EditableGenerationParameters = Pick<
   | "presencePenalty"
   | "reasoningEffort"
   | "verbosity"
+  | "assistantPrefill"
+  | "customParameters"
 >;
 
 type EditableGenerationParameterOverrides = Partial<EditableGenerationParameters>;
@@ -29,6 +31,8 @@ export const CHAT_PARAMETER_DEFAULTS: EditableGenerationParameters = {
   presencePenalty: 0,
   reasoningEffort: "maximum",
   verbosity: "high",
+  assistantPrefill: "",
+  customParameters: {},
 };
 
 export const ROLEPLAY_PARAMETER_DEFAULTS: EditableGenerationParameters = {
@@ -40,6 +44,8 @@ export const ROLEPLAY_PARAMETER_DEFAULTS: EditableGenerationParameters = {
   presencePenalty: 0,
   reasoningEffort: "maximum",
   verbosity: "high",
+  assistantPrefill: "",
+  customParameters: {},
 };
 
 export function parseEditableGenerationParameters(raw: unknown): EditableGenerationParameterOverrides | null {
@@ -80,6 +86,17 @@ export function parseEditableGenerationParameters(raw: unknown): EditableGenerat
   ) {
     next.verbosity = source.verbosity;
   }
+  if (typeof source.assistantPrefill === "string") {
+    next.assistantPrefill = source.assistantPrefill;
+  }
+  if (
+    source.customParameters &&
+    typeof source.customParameters === "object" &&
+    !Array.isArray(source.customParameters) &&
+    Object.keys(source.customParameters).length > 0
+  ) {
+    next.customParameters = source.customParameters as Record<string, unknown>;
+  }
 
   return Object.keys(next).length > 0 ? next : null;
 }
@@ -115,7 +132,7 @@ export function GenerationParametersFields({
           step={0.05}
         />
         <ParamInput
-          label="Max Tokens"
+          label="Max Output Tokens"
           help="The maximum number of tokens the model can generate in a single response. Higher values allow longer replies."
           value={value.maxTokens}
           onChange={(nextValue) => set("maxTokens", nextValue)}
@@ -163,6 +180,26 @@ export function GenerationParametersFields({
         />
       </div>
       <div className="space-y-2">
+        <div>
+          <span className="inline-flex items-center gap-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+            Assistant Prefill
+            <HelpTooltip
+              text="Optional assistant-role text appended after the final user message. Use this only for models that support assistant prefill/continuation or need a specific opening tag."
+              size="0.625rem"
+            />
+          </span>
+          <textarea
+            value={value.assistantPrefill}
+            onChange={(e) => set("assistantPrefill", e.target.value)}
+            rows={3}
+            className="mt-1 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-[var(--ring)]"
+            placeholder="e.g. <thinking>\n"
+          />
+        </div>
+        <CustomParametersInput
+          value={value.customParameters}
+          onChange={(nextValue) => set("customParameters", nextValue)}
+        />
         <div>
           <span className="inline-flex items-center gap-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
             Reasoning Effort
@@ -216,6 +253,110 @@ export function GenerationParametersFields({
       </div>
     </div>
   );
+}
+
+function CustomParametersInput({
+  value,
+  onChange,
+}: {
+  value: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
+}) {
+  const serialized = stringifyCustomParameters(value);
+  const [draft, setDraft] = useState(serialized);
+  const [error, setError] = useState<string | null>(null);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(serialized);
+      setError(null);
+    }
+  }, [focused, serialized]);
+
+  const commit = () => {
+    const parsed = parseCustomParametersDraft(draft);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    setError(null);
+    onChange(parsed.value);
+    setDraft(stringifyCustomParameters(parsed.value));
+  };
+
+  return (
+    <div>
+      <span className="inline-flex items-center gap-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+        Custom Parameters
+        <HelpTooltip
+          text="Optional raw JSON object merged into the provider request body. This can break requests if the provider does not support a key."
+          size="0.625rem"
+        />
+      </span>
+      <textarea
+        value={draft}
+        onFocus={() => setFocused(true)}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setError(null);
+        }}
+        onBlur={() => {
+          setFocused(false);
+          commit();
+        }}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+        rows={3}
+        spellCheck={false}
+        className="mt-1 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-[var(--ring)]"
+        placeholder={focused ? "" : '{ "thinking": true }'}
+      />
+      {error ? (
+        <p className="mt-1 text-[0.5625rem] text-amber-500">{error}</p>
+      ) : (
+        <p className="mt-1 text-[0.5625rem] text-[var(--muted-foreground)]/70">
+          Must be a JSON object. Use lowercase true, false, and null.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function stringifyCustomParameters(value: Record<string, unknown> | null | undefined): string {
+  if (!value || Object.keys(value).length === 0) return "";
+  return JSON.stringify(value, null, 2);
+}
+
+function parseCustomParametersDraft(
+  draft: string,
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  const trimmed = draft.trim();
+  if (!trimmed) return { ok: true, value: {} };
+
+  const attempts = [trimmed];
+  const normalized = trimmed
+    .replace(/\bTrue\b/g, "true")
+    .replace(/\bFalse\b/g, "false")
+    .replace(/\bNone\b/g, "null");
+  if (normalized !== trimmed) attempts.push(normalized);
+
+  for (const attempt of attempts) {
+    try {
+      const parsed = JSON.parse(attempt);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { ok: true, value: parsed as Record<string, unknown> };
+      }
+      return { ok: false, error: "Custom parameters must be a JSON object, not an array or scalar." };
+    } catch {
+      // Try the next normalized variant.
+    }
+  }
+
+  return { ok: false, error: "Invalid JSON. Check quotes, commas, and boolean casing." };
 }
 
 function ParamInput({

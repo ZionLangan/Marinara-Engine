@@ -36,6 +36,8 @@ import {
   ChevronDown,
   ExternalLink,
   ImageIcon,
+  RotateCcw,
+  SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { showConfirmDialog } from "../../lib/app-dialogs";
@@ -53,7 +55,18 @@ import {
   MODEL_LISTS,
   IMAGE_GENERATION_SOURCES,
   inferImageSource,
+  IMAGE_DEFAULTS_STORAGE_KEY,
+  COMFYUI_SAMPLER_OPTIONS,
+  COMFYUI_SCHEDULER_OPTIONS,
+  SD_WEBUI_SAMPLER_OPTIONS,
+  SD_WEBUI_SCHEDULER_OPTIONS,
+  createDefaultImageGenerationProfile,
+  imageSourceToDefaultsService,
+  normalizeImageGenerationProfile,
+  sanitizeImageGenerationProfile,
   type APIProvider,
+  type ImageDefaultsService,
+  type ImageGenerationDefaultsProfile,
 } from "@marinara-engine/shared";
 
 /** Links where users can obtain API keys for each provider */
@@ -65,6 +78,7 @@ const API_KEY_LINKS: Partial<Record<APIProvider, { label: string; url: string }>
   cohere: { label: "Get your Cohere API key", url: "https://dashboard.cohere.com/api-keys" },
   openrouter: { label: "Get your OpenRouter API key", url: "https://openrouter.ai/keys" },
   nanogpt: { label: "Get your NanoGPT API key", url: "https://nano-gpt.com/api" },
+  xai: { label: "Get your xAI API key", url: "https://console.x.ai" },
 };
 
 // ═══════════════════════════════════════════════
@@ -114,6 +128,8 @@ export function ConnectionEditor() {
   const [localDefaultParametersEnabled, setLocalDefaultParametersEnabled] = useState(false);
   const [localDefaultParameters, setLocalDefaultParameters] =
     useState<EditableGenerationParameters>(ROLEPLAY_PARAMETER_DEFAULTS);
+  const [localImageDefaults, setLocalImageDefaults] = useState<ImageGenerationDefaultsProfile | null>(null);
+  const [imageDefaultsExpanded, setImageDefaultsExpanded] = useState(false);
 
   // Test results
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latencyMs: number } | null>(null);
@@ -198,18 +214,27 @@ export function ConnectionEditor() {
     setLocalEmbeddingBaseUrl((c.embeddingBaseUrl as string) ?? "");
     setLocalEmbeddingConnectionId((c.embeddingConnectionId as string) ?? "");
     setLocalOpenrouterProvider((c.openrouterProvider as string) ?? "");
-    setLocalImageGenerationSource(
+    const imageGenerationSource =
       (c.provider as APIProvider) === "image_generation"
         ? ((c.imageGenerationSource as string) ??
-            (c.imageService as string) ??
-            inferImageSource((c.model as string) ?? "", (c.baseUrl as string) ?? ""))
-        : "",
-    );
+          (c.imageService as string) ??
+          inferImageSource((c.model as string) ?? "", (c.baseUrl as string) ?? ""))
+        : "";
+    const imageService = ((c.imageService as string | null) ?? (c.imageGenerationSource as string | null)) || null;
+    const defaultsService = imageSourceToDefaultsService(imageService || imageGenerationSource);
+    const storedImageDefaults = defaultsService
+      ? getStoredImageGenerationDefaults(c.defaultParameters, defaultsService)
+      : null;
+    setLocalImageGenerationSource(imageGenerationSource);
     setLocalComfyuiWorkflow((c.comfyuiWorkflow as string) ?? "");
-    setLocalImageService(((c.imageService as string | null) ?? (c.imageGenerationSource as string | null)) || null);
+    setLocalImageService(imageService);
     setLocalMaxTokensOverride(typeof c.maxTokensOverride === "number" ? (c.maxTokensOverride as number) : null);
     setLocalDefaultParametersEnabled(!!parseEditableGenerationParameters(c.defaultParameters));
     setLocalDefaultParameters(getEditableGenerationParameters(ROLEPLAY_PARAMETER_DEFAULTS, c.defaultParameters));
+    setLocalImageDefaults(
+      defaultsService ? (storedImageDefaults ?? createDefaultImageGenerationProfile(defaultsService)) : null,
+    );
+    setImageDefaultsExpanded(!!storedImageDefaults);
     setDirty(false);
     setSaveError(null);
     setTestResult(null);
@@ -267,6 +292,19 @@ export function ConnectionEditor() {
     localProvider === "image_generation"
       ? localImageGenerationSource || localImageService || effectiveImageGenerationSource
       : "";
+  const selectedImageDefaultsService = imageSourceToDefaultsService(selectedImageService);
+
+  useEffect(() => {
+    if (localProvider !== "image_generation" || !selectedImageDefaultsService) {
+      setLocalImageDefaults(null);
+      return;
+    }
+    setLocalImageDefaults((current) =>
+      current?.service === selectedImageDefaultsService
+        ? sanitizeImageGenerationProfile(current, selectedImageDefaultsService)
+        : createDefaultImageGenerationProfile(selectedImageDefaultsService),
+    );
+  }, [localProvider, selectedImageDefaultsService]);
 
   // Model list for current provider
   const providerModels = useMemo(() => {
@@ -341,6 +379,18 @@ export function ConnectionEditor() {
           id: connectionDetailId,
           params: localDefaultParametersEnabled ? (localDefaultParameters as unknown as Record<string, unknown>) : null,
         });
+      } else {
+        const nextImageDefaults =
+          selectedImageDefaultsService && localImageDefaults
+            ? sanitizeImageGenerationProfile(localImageDefaults, selectedImageDefaultsService)
+            : null;
+        await saveConnectionDefaults.mutateAsync({
+          id: connectionDetailId,
+          params: buildImageDefaultParameters(
+            (conn as Record<string, unknown> | null)?.defaultParameters,
+            nextImageDefaults,
+          ),
+        });
       }
       setDirty(false);
       setSavedFlash(true);
@@ -368,8 +418,11 @@ export function ConnectionEditor() {
     localMaxTokensOverride,
     localDefaultParametersEnabled,
     localDefaultParameters,
+    selectedImageDefaultsService,
+    localImageDefaults,
     updateConnection,
     saveConnectionDefaults,
+    conn,
   ]);
 
   const handleDelete = useCallback(async () => {
@@ -655,11 +708,22 @@ export function ConnectionEditor() {
                 <button
                   key={key}
                   onClick={() => {
+                    const defaultModel = MODEL_LISTS[key]?.[0];
                     setLocalProvider(key);
                     // Auto-fill base URL
                     setLocalBaseUrl(info.defaultBaseUrl);
-                    // Clear model if switching provider
-                    setLocalModel("");
+                    // Clear model when switching providers, except xAI where
+                    // we can seed the newest supported Grok model.
+                    setLocalModel(key === "xai" ? (defaultModel?.id ?? "grok-4.3") : "");
+                    if (key === "xai" && defaultModel?.context) {
+                      setLocalMaxContext(defaultModel.context);
+                    }
+                    // Claude (Subscription) ignores the API key field and
+                    // disables the input — clear any previously typed value
+                    // so a stale key from another provider doesn't get saved.
+                    if (key === "claude_subscription") {
+                      setLocalApiKey("");
+                    }
                     markDirty();
                   }}
                   className={cn(
@@ -1140,7 +1204,7 @@ export function ConnectionEditor() {
             <FieldGroup
               label="ComfyUI Workflow (Optional)"
               icon={<Zap size="0.875rem" className="text-sky-400" />}
-              help="Paste a custom ComfyUI workflow JSON (API format). Use placeholders: %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%. Leave empty to use the built-in default txt2img workflow."
+              help="Paste a custom ComfyUI workflow JSON (API format). Use placeholders like %prompt%, %negative_prompt%, %width%, %height%, %seed%, %model%, %steps%, %cfg%, %sampler%, %scheduler%, and %denoise%. Leave empty to use the built-in default txt2img workflow."
             >
               <textarea
                 ref={comfyWorkflowTextareaRef}
@@ -1198,9 +1262,27 @@ export function ConnectionEditor() {
                 )}
               <p className="text-[0.55rem] text-[var(--muted-foreground)] mt-1">
                 Export your workflow from ComfyUI using <strong>Save (API Format)</strong> in the menu. Placeholders
-                like <code>%prompt%</code> will be replaced at generation time.
+                like <code>%prompt%</code>, <code>%steps%</code>, and <code>%sampler%</code> will be replaced at
+                generation time.
               </p>
             </FieldGroup>
+          )}
+
+          {localProvider === "image_generation" && selectedImageDefaultsService && localImageDefaults && (
+            <ImageGenerationDefaultsPanel
+              service={selectedImageDefaultsService}
+              value={localImageDefaults}
+              expanded={imageDefaultsExpanded}
+              onExpandedChange={setImageDefaultsExpanded}
+              onChange={(next) => {
+                setLocalImageDefaults(sanitizeImageGenerationProfile(next, selectedImageDefaultsService));
+                markDirty();
+              }}
+              onReset={() => {
+                setLocalImageDefaults(createDefaultImageGenerationProfile(selectedImageDefaultsService));
+                markDirty();
+              }}
+            />
           )}
 
           {/* ── Max Context ── */}
@@ -1229,10 +1311,10 @@ export function ConnectionEditor() {
             </FieldGroup>
           )}
 
-          {/* ── Max Tokens Override ── */}
+          {/* ── Max Output Tokens Override ── */}
           {localProvider !== "image_generation" && localProvider !== "claude_subscription" && (
             <FieldGroup
-              label="Max Tokens Override"
+              label="Max Output Tokens Override"
               icon={<Zap size="0.875rem" className="text-amber-400" />}
               help="Hard cap on max_tokens for the API response (limiting output size). Use this for providers that enforce a lower limit than what the engine calculates (e.g. DeepSeek caps at 8192). Leave empty to let the engine decide."
             >
@@ -1612,8 +1694,387 @@ function TestResultCard({
   );
 }
 
+function ImageGenerationDefaultsPanel({
+  service,
+  value,
+  expanded,
+  onExpandedChange,
+  onChange,
+  onReset,
+}: {
+  service: ImageDefaultsService;
+  value: ImageGenerationDefaultsProfile;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+  onChange: (next: ImageGenerationDefaultsProfile) => void;
+  onReset: () => void;
+}) {
+  const updateSeed = (seed: number) => {
+    onChange({ ...value, seed });
+  };
+
+  const automatic1111 = value.automatic1111 ?? createDefaultImageGenerationProfile("automatic1111").automatic1111!;
+  const comfyui = value.comfyui ?? createDefaultImageGenerationProfile("comfyui").comfyui!;
+
+  const updateAutomatic1111 = (patch: Partial<typeof automatic1111>) => {
+    onChange({
+      ...value,
+      service: "automatic1111",
+      automatic1111: { ...automatic1111, ...patch },
+    });
+  };
+
+  const updateComfyUi = (patch: Partial<typeof comfyui>) => {
+    onChange({
+      ...value,
+      service: "comfyui",
+      comfyui: { ...comfyui, ...patch },
+    });
+  };
+
+  return (
+    <FieldGroup
+      label="Local Image Defaults"
+      icon={<SlidersHorizontal size="0.875rem" className="text-sky-400" />}
+      help="Connection-scoped defaults for local Stable Diffusion backends. These only apply when this image generation connection is selected for a generation."
+    >
+      <div className="rounded-xl bg-[var(--secondary)]/40 ring-1 ring-[var(--border)]">
+        <button
+          type="button"
+          onClick={() => onExpandedChange(!expanded)}
+          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--accent)]"
+        >
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-[var(--foreground)]">
+              {service === "comfyui" ? "ComfyUI generation setup" : "AUTOMATIC1111 / Forge setup"}
+            </div>
+            <p className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+              Prompt prefixes, sampler, scheduler, steps, CFG, seed, clip skip, and denoise.
+            </p>
+          </div>
+          <ChevronDown
+            size="0.875rem"
+            className={cn("shrink-0 text-[var(--muted-foreground)] transition-transform", expanded && "rotate-180")}
+          />
+        </button>
+
+        {expanded && (
+          <div className="space-y-4 border-t border-[var(--border)] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
+                Seed -1 keeps generation random. Any non-negative seed is reused exactly for this connection.
+              </p>
+              <button
+                type="button"
+                onClick={onReset}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--card)] px-2.5 py-1.5 text-[0.625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+              >
+                <RotateCcw size="0.6875rem" />
+                Reset
+              </button>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <NumberSetting label="Seed" value={value.seed} min={-1} max={4_294_967_295} onCommit={updateSeed} />
+              {service === "automatic1111" ? (
+                <>
+                  <NumberSetting
+                    label="Steps"
+                    value={automatic1111.steps}
+                    min={1}
+                    max={150}
+                    onCommit={(steps) => updateAutomatic1111({ steps })}
+                  />
+                  <NumberSetting
+                    label="CFG Scale"
+                    value={automatic1111.cfgScale}
+                    min={0}
+                    max={30}
+                    integer={false}
+                    onCommit={(cfgScale) => updateAutomatic1111({ cfgScale })}
+                  />
+                  <NumberSetting
+                    label="Clip Skip"
+                    value={automatic1111.clipSkip ?? 0}
+                    min={0}
+                    max={12}
+                    onCommit={(clipSkip) => updateAutomatic1111({ clipSkip: clipSkip > 0 ? clipSkip : null })}
+                  />
+                  <NumberSetting
+                    label="Img2Img Denoise"
+                    value={automatic1111.denoisingStrength}
+                    min={0}
+                    max={1}
+                    integer={false}
+                    onCommit={(denoisingStrength) => updateAutomatic1111({ denoisingStrength })}
+                  />
+                </>
+              ) : (
+                <>
+                  <NumberSetting
+                    label="Steps"
+                    value={comfyui.steps}
+                    min={1}
+                    max={150}
+                    onCommit={(steps) => updateComfyUi({ steps })}
+                  />
+                  <NumberSetting
+                    label="CFG Scale"
+                    value={comfyui.cfgScale}
+                    min={0}
+                    max={30}
+                    integer={false}
+                    onCommit={(cfgScale) => updateComfyUi({ cfgScale })}
+                  />
+                  <NumberSetting
+                    label="Denoise"
+                    value={comfyui.denoisingStrength}
+                    min={0}
+                    max={1}
+                    integer={false}
+                    onCommit={(denoisingStrength) => updateComfyUi({ denoisingStrength })}
+                  />
+                  <NumberSetting
+                    label="Clip Skip"
+                    value={comfyui.clipSkip ?? 0}
+                    min={0}
+                    max={12}
+                    onCommit={(clipSkip) => updateComfyUi({ clipSkip: clipSkip > 0 ? clipSkip : null })}
+                  />
+                </>
+              )}
+            </div>
+
+            {service === "automatic1111" ? (
+              <>
+                <TextSetting
+                  label="Prompt Prefix"
+                  value={automatic1111.promptPrefix}
+                  onChange={(promptPrefix) => updateAutomatic1111({ promptPrefix })}
+                  placeholder="e.g. masterpiece, high quality"
+                />
+                <TextSetting
+                  label="Negative Prefix"
+                  value={automatic1111.negativePromptPrefix}
+                  onChange={(negativePromptPrefix) => updateAutomatic1111({ negativePromptPrefix })}
+                  placeholder="e.g. low quality, blurry"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <ChoiceSetting
+                    label="Sampler"
+                    value={automatic1111.sampler}
+                    options={SD_WEBUI_SAMPLER_OPTIONS}
+                    onChange={(sampler) => updateAutomatic1111({ sampler })}
+                  />
+                  <ChoiceSetting
+                    label="Scheduler"
+                    value={automatic1111.scheduler}
+                    options={SD_WEBUI_SCHEDULER_OPTIONS}
+                    onChange={(scheduler) => updateAutomatic1111({ scheduler })}
+                  />
+                </div>
+                <label className="flex cursor-pointer items-center gap-3 rounded-lg bg-[var(--card)] px-3 py-2 ring-1 ring-[var(--border)]">
+                  <input
+                    type="checkbox"
+                    checked={automatic1111.restoreFaces}
+                    onChange={(event) => updateAutomatic1111({ restoreFaces: event.target.checked })}
+                    className="h-4 w-4 accent-sky-400"
+                  />
+                  <span className="text-xs text-[var(--foreground)]">Restore faces</span>
+                </label>
+              </>
+            ) : (
+              <>
+                <TextSetting
+                  label="Prompt Prefix"
+                  value={comfyui.promptPrefix}
+                  onChange={(promptPrefix) => updateComfyUi({ promptPrefix })}
+                  placeholder="e.g. masterpiece, high quality"
+                />
+                <TextSetting
+                  label="Negative Prefix"
+                  value={comfyui.negativePromptPrefix}
+                  onChange={(negativePromptPrefix) => updateComfyUi({ negativePromptPrefix })}
+                  placeholder="e.g. low quality, blurry"
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <ChoiceSetting
+                    label="Sampler"
+                    value={comfyui.sampler}
+                    options={COMFYUI_SAMPLER_OPTIONS}
+                    onChange={(sampler) => updateComfyUi({ sampler })}
+                  />
+                  <ChoiceSetting
+                    label="Scheduler"
+                    value={comfyui.scheduler}
+                    options={COMFYUI_SCHEDULER_OPTIONS}
+                    onChange={(scheduler) => updateComfyUi({ scheduler })}
+                  />
+                </div>
+                <p className="text-[0.55rem] text-[var(--muted-foreground)]">
+                  Custom ComfyUI workflows can use %steps%, %cfg%, %sampler%, %scheduler%, %denoise%, and %clip_skip%
+                  placeholders.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </FieldGroup>
+  );
+}
+
+function TextSetting({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        rows={2}
+        placeholder={placeholder}
+        className="mt-1 w-full resize-y rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-sky-400/50"
+      />
+    </label>
+  );
+}
+
+function ChoiceSetting({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  const listId = `image-default-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <input
+        list={listId}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/60 focus:outline-none focus:ring-sky-400/50"
+        placeholder="Backend default"
+      />
+      <datalist id={listId}>
+        {options.map((option) => (
+          <option key={`${label}-${option.value}`} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </datalist>
+    </label>
+  );
+}
+
+function NumberSetting({
+  label,
+  value,
+  min,
+  max,
+  integer = true,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  integer?: boolean;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, integer ? Math.trunc(parsed) : parsed));
+    setDraft(String(clamped));
+    onCommit(clamped);
+  };
+
+  return (
+    <label className="block">
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{label}</span>
+      <input
+        value={draft}
+        type="number"
+        min={min}
+        max={max}
+        step={integer ? 1 : 0.05}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.currentTarget.blur();
+          }
+        }}
+        className="mt-1 w-full rounded-lg bg-[var(--card)] px-3 py-2 text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-sky-400/50"
+      />
+    </label>
+  );
+}
+
 function formatContext(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(0)}K`;
   return String(tokens);
+}
+
+function getStoredImageGenerationDefaults(
+  raw: unknown,
+  service: ImageDefaultsService,
+): ImageGenerationDefaultsProfile | null {
+  const root = parseDefaultParametersRoot(raw);
+  if (!root[IMAGE_DEFAULTS_STORAGE_KEY]) return null;
+  return normalizeImageGenerationProfile(root[IMAGE_DEFAULTS_STORAGE_KEY], service).profile;
+}
+
+function buildImageDefaultParameters(
+  raw: unknown,
+  imageDefaults: ImageGenerationDefaultsProfile | null,
+): Record<string, unknown> | null {
+  const root = parseDefaultParametersRoot(raw);
+  if (imageDefaults) {
+    root[IMAGE_DEFAULTS_STORAGE_KEY] = imageDefaults;
+  } else {
+    delete root[IMAGE_DEFAULTS_STORAGE_KEY];
+  }
+  return Object.keys(root).length > 0 ? root : null;
+}
+
+function parseDefaultParametersRoot(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  let parsed: unknown = raw;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return {};
+    }
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? { ...(parsed as Record<string, unknown>) }
+    : {};
 }

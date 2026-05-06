@@ -4,7 +4,7 @@
 import type { GenerationParameters } from "../types/prompt.js";
 
 /** App version — single source of truth. */
-export const APP_VERSION = "1.5.6";
+export const APP_VERSION = "1.5.8";
 
 /** Stable synthetic connection id for the built-in local llama sidecar. */
 export const LOCAL_SIDECAR_CONNECTION_ID = "__local_sidecar__";
@@ -27,6 +27,8 @@ export const DEFAULT_GENERATION_PARAMS: GenerationParameters = {
   presencePenalty: 0,
   reasoningEffort: null,
   verbosity: null,
+  assistantPrefill: "",
+  customParameters: {},
   squashSystemMessages: true,
   showThoughts: true,
   useMaxContext: false,

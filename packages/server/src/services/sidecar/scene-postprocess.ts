@@ -14,6 +14,7 @@ import type {
   SceneIllustrationRequest,
   SceneSegmentEffect,
 } from "@marinara-engine/shared";
+import { normalizeLocationKind, normalizeMusicGenre, normalizeMusicIntensity } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 
 // ── Expression normalization ──
@@ -322,13 +323,17 @@ function capCombinedDirections(result: SceneAnalysis): SceneAnalysis {
  */
 export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessContext): SceneAnalysis {
   const result = { ...raw };
+  const rawRecord = raw as unknown as Record<string, unknown>;
 
   // ── Sanitize string "null" → actual null (grammar sometimes emits the string) ──
   if (result.background === "null") result.background = null;
-  if (result.music === "null") result.music = null;
-  if (result.ambient === "null") result.ambient = null;
   if (result.weather === "null") result.weather = null;
   if (result.timeOfDay === "null") result.timeOfDay = null;
+  result.music = null;
+  result.ambient = null;
+  result.musicGenre = normalizeMusicGenre(rawRecord.musicGenre);
+  result.musicIntensity = normalizeMusicIntensity(rawRecord.musicIntensity);
+  result.locationKind = normalizeLocationKind(rawRecord.locationKind);
 
   // ── Background ──
   if (result.background && !ctx.availableBackgrounds.includes(result.background)) {
@@ -357,8 +362,8 @@ export function postProcessSceneResult(raw: SceneAnalysis, ctx: PostProcessConte
     }
   }
 
-  // Music and ambient are scored deterministically by scoreMusic/scoreAmbient on the server.
-  // The LLM is no longer asked to produce these fields, so no postprocessing needed.
+  // Music and ambient file tags are scored deterministically by scoreMusic/scoreAmbient.
+  // Scene analysis only provides compact hints: musicGenre, musicIntensity, locationKind.
 
   // ── Weather — map non-visual values to visual equivalents ──
   if (result.weather) {

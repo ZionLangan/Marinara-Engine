@@ -53,6 +53,17 @@ function isDisabledFlag(value: string | undefined | null) {
   return ["0", "false", "no", "off"].includes((value ?? "").trim().toLowerCase());
 }
 
+function isEnabledFlag(value: string | undefined | null) {
+  return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+function parseCsv(value: string | undefined | null): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 export function getMonorepoRoot() {
   return MONOREPO_ROOT;
 }
@@ -92,6 +103,26 @@ export function getDatabaseDriver() {
   return normalizeEnvValue(process.env.DATABASE_DRIVER);
 }
 
+export function getStorageBackend() {
+  const raw = normalizeEnvValue(process.env.STORAGE_BACKEND ?? process.env.MARINARA_STORAGE_BACKEND);
+  if (raw) return raw.toLowerCase();
+
+  // New default for v1.5.7+: user data is persisted as files. Advanced users
+  // can opt back into the legacy persistent SQLite database with
+  // STORAGE_BACKEND=sqlite.
+  return "files";
+}
+
+export function isFileStorageBackend() {
+  return getStorageBackend() !== "sqlite";
+}
+
+export function getFileStorageDir() {
+  const raw = normalizeEnvValue(process.env.FILE_STORAGE_DIR ?? process.env.MARINARA_FILE_STORAGE_DIR);
+  if (raw) return resolveFromServerRoot(raw);
+  return resolve(getDataDir(), "storage");
+}
+
 export function getDatabaseUrl() {
   const raw = normalizeEnvValue(process.env.DATABASE_URL);
   if (!raw) {
@@ -119,6 +150,13 @@ export function getDatabaseFilePath() {
   return filePath;
 }
 
+export function getLegacyDatabaseImportPaths() {
+  const candidates = [getDatabaseFilePath(), DEFAULT_DATABASE_PATH, REGRESSION_DATABASE_PATH].filter(
+    (path): path is string => Boolean(path),
+  );
+  return [...new Set(candidates)];
+}
+
 export function getIpAllowlist() {
   // Explicit off-switch lets users keep their list configured but
   // temporarily disable enforcement without deleting the entries.
@@ -140,8 +178,15 @@ export function getBasicAuthConfig() {
  * Default false — protects users who accidentally expose the port.
  */
 export function isUnauthenticatedRemoteAllowed() {
-  const value = (process.env.ALLOW_UNAUTHENTICATED_REMOTE ?? "").trim().toLowerCase();
-  return ["1", "true", "yes", "on"].includes(value);
+  return isEnabledFlag(process.env.ALLOW_UNAUTHENTICATED_REMOTE);
+}
+
+/**
+ * Explicit compatibility switch for old LAN/Tailscale/Docker convenience.
+ * Default false: loopback stays passwordless; every other client needs auth.
+ */
+export function isUnauthenticatedPrivateNetworkAllowed() {
+  return isEnabledFlag(process.env.ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK);
 }
 
 /**
@@ -166,12 +211,111 @@ export function getAdminSecret() {
   return normalizeEnvValue(process.env.ADMIN_SECRET);
 }
 
+export function isAdminSecretRequiredOnLoopback() {
+  return isEnabledFlag(process.env.MARINARA_REQUIRE_ADMIN_SECRET_ON_LOOPBACK);
+}
+
+export function getCsrfTrustedOrigins() {
+  return parseCsv(process.env.CSRF_TRUSTED_ORIGINS);
+}
+
+export function isUpdatesApplyEnabled() {
+  return isEnabledFlag(process.env.UPDATES_APPLY_ENABLED);
+}
+
+export function isUpdatesRemoteApplyAllowed() {
+  return isEnabledFlag(process.env.UPDATES_ALLOW_REMOTE_APPLY);
+}
+
+export function isProviderLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.PROVIDER_LOCAL_URLS_ENABLED);
+}
+
+export function isImageLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.IMAGE_LOCAL_URLS_ENABLED);
+}
+
+export function isTtsLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.TTS_LOCAL_URLS_ENABLED);
+}
+
+export function isDeeplxLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.DEEPLX_LOCAL_URLS_ENABLED);
+}
+
+export function isWebhookLocalUrlsEnabled() {
+  return isEnabledFlag(process.env.WEBHOOK_LOCAL_URLS_ENABLED);
+}
+
+export function isCustomToolScriptEnabled() {
+  return isEnabledFlag(process.env.CUSTOM_TOOL_SCRIPT_ENABLED);
+}
+
+export function isSidecarRuntimeInstallEnabled() {
+  return isEnabledFlag(process.env.SIDECAR_RUNTIME_INSTALL_ENABLED);
+}
+
+export function isHapticsRemoteAllowed() {
+  return isEnabledFlag(process.env.HAPTICS_ALLOW_REMOTE);
+}
+
+export function getImportAllowedRoots() {
+  return parseCsv(process.env.IMPORT_ALLOWED_ROOTS).map(resolveFromRepoRoot);
+}
+
 export function getEncryptionKeyOverride() {
   return normalizeEnvValue(process.env.ENCRYPTION_KEY);
 }
 
+export function getSpotifyRedirectUriOverride() {
+  return normalizeEnvValue(process.env.SPOTIFY_REDIRECT_URI);
+}
+
+function getLoopbackFallbackRedirectUri() {
+  return `http://127.0.0.1:${getPort()}/api/spotify/callback`;
+}
+
+function stripPort(host: string) {
+  return host.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+}
+
+function isLoopbackHost(host: string) {
+  const hostname = stripPort(host);
+  return hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | null {
+  if (!value) return null;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return null;
+  const first = raw.split(",")[0]?.trim();
+  return first ? first : null;
+}
+
+type RedirectUriRequest = {
+  protocol?: string;
+  hostname?: string;
+  headers: Record<string, string | string[] | undefined>;
+};
+
+export function buildSpotifyRedirectUri(req: RedirectUriRequest): string {
+  const override = getSpotifyRedirectUriOverride();
+  if (override) return override;
+
+  const protocol = (req.protocol ?? "http").toLowerCase();
+  const hostHeader = firstHeaderValue(req.headers["host"]);
+  const hostname = req.hostname ?? (hostHeader ? stripPort(hostHeader) : null);
+
+  if (!hostname) return getLoopbackFallbackRedirectUri();
+  const host = hostHeader ?? hostname;
+
+  if (protocol === "https") return `https://${host}/api/spotify/callback`;
+  if (protocol === "http" && isLoopbackHost(host)) return `http://${host}/api/spotify/callback`;
+  return getLoopbackFallbackRedirectUri();
+}
+
 export function getSpotifyRedirectUri() {
-  return `${getServerProtocol()}://127.0.0.1:${getPort()}/api/spotify/callback`;
+  return getSpotifyRedirectUriOverride() ?? getLoopbackFallbackRedirectUri();
 }
 
 export function getCorsConfig() {
@@ -252,9 +396,17 @@ export function logStorageDiagnostics(
 ) {
   const dataDir = getDataDir();
   const dbPath = getDatabaseFilePath();
+  const backend = getStorageBackend();
+  const legacyImportPaths = getLegacyDatabaseImportPaths();
 
   logger.info(`[storage] DATA_DIR=${dataDir}`);
-  if (dbPath) {
+  logger.info(`[storage] STORAGE_BACKEND=${backend}`);
+  if (backend !== "sqlite") {
+    logger.info(`[storage] FILE_STORAGE_DIR=${getFileStorageDir()}`);
+    if (legacyImportPaths.length > 0) {
+      logger.info(`[storage] LEGACY_DATABASE_IMPORT_SOURCES=${legacyImportPaths.join(", ")}`);
+    }
+  } else if (dbPath) {
     logger.info(`[storage] DATABASE_FILE=${dbPath}`);
   } else {
     logger.info(`[storage] DATABASE_URL=${getDatabaseUrl()}`);

@@ -118,6 +118,10 @@ export interface ChatMetadata {
   spriteCharacterIds?: string[];
   /** Preferred sidebar / default layout side for chat sprites. */
   spritePosition?: SpriteSide;
+  /** Display scale for roleplay Expression Engine sprites. */
+  spriteScale?: number;
+  /** Display opacity for roleplay Expression Engine sprites. */
+  spriteOpacity?: number;
   /** Saved freeform positions for enabled roleplay sprites. */
   spritePlacements?: Record<string, SpritePlacement>;
   /** When true, a shared group scenario replaces individual character card scenarios */
@@ -137,6 +141,10 @@ export interface ChatMetadata {
   appliedChatPresetId?: string | null;
   /** Custom prompt prefix used by the /impersonate slash command. */
   impersonatePrompt?: string | null;
+  /** Show a manual draft translation button beside the send control. */
+  showInputTranslateButton?: boolean;
+  /** Allow roleplay characters to create direct-message conversation chats with hidden [dm] commands. */
+  roleplayDmCommandsEnabled?: boolean;
 
   // ── Conversation Mode Fields ──
   /** Whether conversation character schedules are enabled for this chat. */
@@ -191,12 +199,38 @@ export interface ChatMetadata {
   gameLastIllustrationSessionNumber?: number | null;
   /** Background tag for the last rare generated scene illustration. */
   gameLastIllustrationTag?: string;
+  /** Run Game Lorebook Keeper after a session is concluded. */
+  gameLorebookKeeperEnabled?: boolean;
+  /** Chat-scoped lorebook maintained by Game Lorebook Keeper. */
+  gameLorebookKeeperLorebookId?: string | null;
+  /** Status of the most recent Game Lorebook Keeper session-end run. */
+  gameLorebookKeeperLastRun?: {
+    sessionNumber: number;
+    status: "running" | "success" | "failed";
+    updatedAt: string;
+    lorebookId?: string | null;
+    entryCount?: number;
+    error?: string;
+  } | null;
 
   // ── Conversation-Mode Auto-Summarization ──
   /** Per-day auto-generated conversation summaries (key: "DD.MM.YYYY"). */
   daySummaries?: Record<string, DaySummaryEntry>;
   /** Per-week consolidated conversation summaries (key: Monday "DD.MM.YYYY"). */
   weekSummaries?: Record<string, WeekSummaryEntry>;
+  /**
+   * Hour of day (0-11, local time) at which a conversation "day" rolls over for
+   * summarization. Messages sent before this hour are filed under the previous
+   * day, so a late-night session isn't cut off mid-conversation. Default: 4.
+   */
+  dayRolloverHour?: number;
+  /**
+   * How many of the most recent messages to keep verbatim in the prompt even
+   * after they've been summarized. Bridges the day boundary so characters can
+   * pick up the actual flow of recent conversation, not just the gist. 0 disables.
+   * Valid range: 0-50. Default: 10.
+   */
+  summaryTailMessages?: number;
 
   /** Any extra key-value data */
   [key: string]: unknown;
@@ -214,6 +248,8 @@ export interface Message {
   activeSwipeIndex: number;
   /** Number of swipes for this message (0 or 1 = no alternatives) */
   swipeCount?: number;
+  /** Server-side SQLite row position used only for stable pagination cursors */
+  rowid?: number;
   createdAt: string;
   /** Extra display data */
   extra: MessageExtra;
@@ -262,6 +298,8 @@ export interface MessageExtra {
   } | null;
   /** Stored for generation context but hidden from the visible chat transcript */
   hiddenFromUser?: boolean;
+  /** When true, the visible message is excluded from future AI prompt context */
+  hiddenFromAI?: boolean;
 }
 
 /** Metadata about how a message was generated. */
@@ -313,5 +351,15 @@ export interface OocInfluence {
   content: string;
   anchorMessageId: string;
   consumed: boolean;
+  createdAt: string;
+}
+
+/** A durable note emitted from a conversation chat that persists in the connected roleplay's prompt until cleared. */
+export interface ConversationNote {
+  id: string;
+  sourceChatId: string;
+  targetChatId: string;
+  content: string;
+  anchorMessageId: string;
   createdAt: string;
 }

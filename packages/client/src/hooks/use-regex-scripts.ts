@@ -62,6 +62,17 @@ export function useUpdateRegexScript() {
   });
 }
 
+export function useReorderRegexScripts() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scriptIds: string[]) => api.put<RegexScriptRow[]>("/regex-scripts/reorder", { scriptIds }),
+    onSuccess: (scripts) => {
+      qc.setQueryData(regexKeys.all, scripts);
+      qc.invalidateQueries({ queryKey: regexKeys.all });
+    },
+  });
+}
+
 export function useDeleteRegexScript() {
   const qc = useQueryClient();
   return useMutation({

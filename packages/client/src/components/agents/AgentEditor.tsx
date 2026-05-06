@@ -7,7 +7,12 @@ import { useUIStore } from "../../stores/ui.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { useAgentConfigs, useUpdateAgent, useCreateAgent, type AgentConfigRow } from "../../hooks/use-agents";
 import { useConnections } from "../../hooks/use-connections";
-import { useCustomTools, type CustomToolRow } from "../../hooks/use-custom-tools";
+import {
+  isCustomToolSelectable,
+  useCustomToolCapabilities,
+  useCustomTools,
+  type CustomToolRow,
+} from "../../hooks/use-custom-tools";
 import {
   ArrowLeft,
   Save,
@@ -28,6 +33,8 @@ import {
   Trash2,
   Layers,
   Music,
+  ChevronDown,
+  ChevronUp,
   ExternalLink,
   BookOpen,
   Upload,
@@ -35,22 +42,33 @@ import {
   ImageIcon,
 } from "lucide-react";
 import { useDeleteAgent } from "../../hooks/use-agents";
-import { useLorebooks } from "../../hooks/use-lorebooks";
+import { useLorebooks, useEntriesAcrossLorebooks } from "../../hooks/use-lorebooks";
 import {
   useKnowledgeSources,
   useUploadKnowledgeSource,
   useDeleteKnowledgeSource,
 } from "../../hooks/use-knowledge-sources";
 import { cn } from "../../lib/utils";
+import {
+  getAgentRunIntervalMeta,
+  getCadenceInputValue,
+  parseOptionalCadenceInputValue,
+  stepCadenceValue,
+} from "../../lib/agent-cadence";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import {
   BUILT_IN_AGENTS,
   BUILT_IN_TOOLS,
+  DEFAULT_AGENT_CONTEXT_SIZE,
   DEFAULT_AGENT_TOOLS,
+  DEFAULT_AGENT_MAX_TOKENS,
   LOCAL_SIDECAR_CONNECTION_ID,
+  MAX_AGENT_MAX_TOKENS,
+  MIN_AGENT_MAX_TOKENS,
   getDefaultBuiltInAgentSettings,
   getDefaultAgentPrompt,
   type AgentPhase,
+  type AgentResultType,
   type ToolDefinition,
 } from "@marinara-engine/shared";
 
@@ -65,6 +83,17 @@ function createCustomAgentType(name: string): string {
       ? globalThis.crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   return `custom-${slug}-${suffix}`;
+}
+
+// Mirrors the server's buildSpotifyRedirectUri rule: Spotify only accepts
+// https:// or http://127.0.0.1, so fall back to loopback whenever the page
+// is served over plain HTTP from a non-loopback host.
+function getDisplayedSpotifyRedirectUri(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:7860/api/spotify/callback";
+  const { protocol, hostname, origin, port } = window.location;
+  const isLoopback = hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  if (protocol === "https:" || isLoopback) return `${origin}/api/spotify/callback`;
+  return `http://127.0.0.1:${port || "7860"}/api/spotify/callback`;
 }
 
 // ═══════════════════════════════════════════════
@@ -91,6 +120,40 @@ const PHASE_META: Record<AgentPhase, { label: string; color: string; icon: typeo
   },
 };
 
+function normalizeAgentMaxTokensInput(value: string): number | "" {
+  if (value === "") return "";
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return "";
+  return Math.max(1, Math.min(MAX_AGENT_MAX_TOKENS, parsed));
+}
+
+function clampAgentMaxTokens(value: number): number {
+  return Math.max(MIN_AGENT_MAX_TOKENS, Math.min(MAX_AGENT_MAX_TOKENS, Math.trunc(value)));
+}
+
+type CustomAgentResultType = Extract<AgentResultType, "context_injection" | "text_rewrite">;
+
+const CUSTOM_AGENT_RESULT_TYPE_OPTIONS: Array<{
+  id: CustomAgentResultType;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "context_injection",
+    label: "Context Injection",
+    description: "Adds text context before generation, or records informational text after generation.",
+  },
+  {
+    id: "text_rewrite",
+    label: "Text Rewrite",
+    description: 'Runs after the reply and expects JSON with "editedText" plus "changes" to replace the message.',
+  },
+];
+
+function normalizeCustomResultType(value: unknown): CustomAgentResultType {
+  return value === "text_rewrite" ? "text_rewrite" : "context_injection";
+}
+
 // ═══════════════════════════════════════════════
 //  Main Editor
 // ═══════════════════════════════════════════════
@@ -101,6 +164,7 @@ export function AgentEditor() {
   const { data: agentConfigs } = useAgentConfigs();
   const { data: connections } = useConnections();
   const { data: customToolsRaw } = useCustomTools();
+  const { data: customToolCapabilities } = useCustomToolCapabilities();
   const updateAgent = useUpdateAgent();
   const createAgent = useCreateAgent();
   const deleteAgent = useDeleteAgent();
@@ -116,6 +180,11 @@ export function AgentEditor() {
 
   // Custom agent = DB entry with no matching built-in
   const isCustomAgent = !builtIn && !!dbConfig;
+  const isNewCustomAgent = agentDetailId === "__new__";
+  const customRunIntervalMeta =
+    isCustomAgent || isNewCustomAgent
+      ? getAgentRunIntervalMeta(isNewCustomAgent ? "__new__" : (dbConfig?.type ?? agentDetailId ?? ""), false)
+      : null;
 
   // Default prompt for this agent type
   const defaultPrompt = useMemo(() => (agentDetailId ? getDefaultAgentPrompt(agentDetailId) : ""), [agentDetailId]);
@@ -127,8 +196,11 @@ export function AgentEditor() {
   const [localConnectionId, setLocalConnectionId] = useState("");
   const [localImageConnectionId, setLocalImageConnectionId] = useState("");
   const [localContextSize, setLocalContextSize] = useState<number | "">("");
+  const [localMaxTokens, setLocalMaxTokens] = useState<number | "">("");
   const [localRunInterval, setLocalRunInterval] = useState<number | "">("");
+  const [customCadenceInputFocused, setCustomCadenceInputFocused] = useState(false);
   const [localPrompt, setLocalPrompt] = useState("");
+  const [localResultType, setLocalResultType] = useState<CustomAgentResultType>("context_injection");
   const [localInjectAsSection, setLocalInjectAsSection] = useState(false);
   const [localEnabledTools, setLocalEnabledTools] = useState<string[]>([]);
   const [localSpotifyClientId, setLocalSpotifyClientId] = useState("");
@@ -142,6 +214,11 @@ export function AgentEditor() {
     redirectUri: string | null;
   } | null>(null);
   const [spotifyConnecting, setSpotifyConnecting] = useState(false);
+  const [spotifyConnectError, setSpotifyConnectError] = useState<string | null>(null);
+  const [spotifyPasteOpen, setSpotifyPasteOpen] = useState(false);
+  const [spotifyPasteValue, setSpotifyPasteValue] = useState("");
+  const [spotifyPasteError, setSpotifyPasteError] = useState<string | null>(null);
+  const [spotifyPasteSubmitting, setSpotifyPasteSubmitting] = useState(false);
   const spotifyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const spotifyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -169,6 +246,7 @@ export function AgentEditor() {
           : dbConfig.settings
         : {};
       setLocalContextSize(settings.contextSize ?? "");
+      setLocalMaxTokens(settings.maxTokens ?? (defaultSettings.maxTokens as number | undefined) ?? "");
       setLocalImageConnectionId((settings.imageConnectionId as string) ?? "");
       setLocalRunInterval(
         (settings.runInterval as number | undefined) ?? (defaultSettings.runInterval as number) ?? "",
@@ -182,6 +260,7 @@ export function AgentEditor() {
       setLocalSourceFileIds(settings.sourceFileIds ?? []);
       setLocalAutoGenerateAvatars(settings.autoGenerateAvatars ?? false);
       setLocalUseAvatarReferences(settings.useAvatarReferences ?? false);
+      setLocalResultType(normalizeCustomResultType(settings.resultType));
       setLocalPrompt(dbConfig.promptTemplate || "");
     } else if (builtIn) {
       setLocalName(builtIn.name);
@@ -190,6 +269,7 @@ export function AgentEditor() {
       setLocalConnectionId("");
       setLocalImageConnectionId("");
       setLocalContextSize("");
+      setLocalMaxTokens((defaultSettings.maxTokens as number) ?? "");
       setLocalRunInterval((defaultSettings.runInterval as number) ?? "");
       setLocalInjectAsSection(defaultSettings.injectAsSection === true);
       setLocalEnabledTools(DEFAULT_AGENT_TOOLS[builtIn.id] ?? []);
@@ -198,6 +278,7 @@ export function AgentEditor() {
       setLocalSourceFileIds([]);
       setLocalAutoGenerateAvatars(false);
       setLocalUseAvatarReferences(false);
+      setLocalResultType("context_injection");
       setLocalPrompt("");
     } else {
       // Brand new custom agent — start empty
@@ -207,7 +288,8 @@ export function AgentEditor() {
       setLocalConnectionId("");
       setLocalImageConnectionId("");
       setLocalContextSize("");
-      setLocalRunInterval("");
+      setLocalMaxTokens(DEFAULT_AGENT_MAX_TOKENS);
+      setLocalRunInterval(customRunIntervalMeta?.defaultValue ?? "");
       setLocalInjectAsSection(false);
       setLocalEnabledTools([]);
       setLocalSpotifyClientId("");
@@ -215,11 +297,12 @@ export function AgentEditor() {
       setLocalSourceFileIds([]);
       setLocalAutoGenerateAvatars(false);
       setLocalUseAvatarReferences(false);
+      setLocalResultType("context_injection");
       setLocalPrompt("");
     }
     setDirty(false);
     setSaveError(null);
-  }, [agentDetailId, dbConfig, builtIn, connections]);
+  }, [agentDetailId, dbConfig, builtIn, connections, customRunIntervalMeta?.defaultValue]);
 
   // Fetch Spotify connection status when viewing a Spotify agent
   const isSpotifyAgent = agentDetailId === "spotify" || dbConfig?.type === "spotify";
@@ -237,7 +320,43 @@ export function AgentEditor() {
   const isKnowledgeRetrievalAgent = agentDetailId === "knowledge-retrieval" || dbConfig?.type === "knowledge-retrieval";
   // Knowledge Router agent — also uses the lorebook source selector (file picker stays Retrieval-only)
   const isKnowledgeRouterAgent = agentDetailId === "knowledge-router" || dbConfig?.type === "knowledge-router";
+
+  // Detect when both knowledge agents will actually run in parallel. Shows a
+  // soft warning so users don't accidentally do overlapping work that bloats
+  // the prompt with two injection blocks. Requires BOTH agents to have saved
+  // config rows AND be enabled — a saved-but-disabled config doesn't run, so
+  // pairing one disabled config with one active config wouldn't actually
+  // produce the parallel-run problem the warning is about.
+  const bothKnowledgeAgentsConfigured = useMemo(() => {
+    if (!agentConfigs) return false;
+    if (!isKnowledgeRouterAgent && !isKnowledgeRetrievalAgent) return false;
+    const rows = agentConfigs as AgentConfigRow[];
+    const enabledTypes = new Set(rows.filter((c) => c.enabled === "true").map((c) => c.type));
+    return enabledTypes.has("knowledge-router") && enabledTypes.has("knowledge-retrieval");
+  }, [agentConfigs, isKnowledgeRetrievalAgent, isKnowledgeRouterAgent]);
+
   const { data: allLorebooks } = useLorebooks();
+
+  // For the router only: compute description coverage across the selected source
+  // lorebooks. Used to render the coverage badge that tells users whether their
+  // selected lorebooks are well-described enough for routing precision.
+  const {
+    entries: routerSourceEntries,
+    isLoading: routerEntriesLoading,
+    isError: routerEntriesError,
+  } = useEntriesAcrossLorebooks(isKnowledgeRouterAgent ? localSourceLorebookIds : []);
+  // `descriptionCoverage` is non-null whenever there's something to display —
+  // including the zero-entry case (renders as "No entries yet"). Returns null
+  // when there's no selection, when entries are still loading/erroring (so the
+  // hook hasn't given us a complete set yet), or when the agent isn't the router.
+  const descriptionCoverage = useMemo(() => {
+    if (localSourceLorebookIds.length === 0) return null;
+    if (!routerSourceEntries) return null; // hook returned undefined → still loading or errored
+    const total = routerSourceEntries.length;
+    const withDescription = routerSourceEntries.filter((e) => e.description?.trim().length > 0).length;
+    const ratio = total > 0 ? withDescription / total : 0;
+    return { withDescription, total, ratio };
+  }, [localSourceLorebookIds.length, routerSourceEntries]);
   const { data: allKnowledgeSources } = useKnowledgeSources();
   const uploadSource = useUploadKnowledgeSource();
   const deleteSource = useDeleteKnowledgeSource();
@@ -303,16 +422,20 @@ export function AgentEditor() {
   const handleSave = useCallback(async () => {
     if (!agentDetailId) return;
     setSaveError(null);
+    const isEditingCustomAgent = isCustomAgent || isNewCustomAgent;
+    const savedPhase = isEditingCustomAgent && localResultType === "text_rewrite" ? "post_processing" : localPhase;
 
     const payload = {
       name: localName,
       description: localDescription,
-      phase: localPhase,
+      phase: savedPhase,
       enabled: true,
       connectionId: localConnectionId || null,
       promptTemplate: localPrompt,
       settings: {
+        ...(isEditingCustomAgent ? { resultType: localResultType } : {}),
         ...(localContextSize !== "" ? { contextSize: Number(localContextSize) } : {}),
+        ...(localMaxTokens !== "" ? { maxTokens: clampAgentMaxTokens(localMaxTokens) } : {}),
         ...(localRunInterval !== "" ? { runInterval: Number(localRunInterval) } : {}),
         ...(localInjectAsSection ? { injectAsSection: true } : {}),
         enabledTools: localEnabledTools,
@@ -356,10 +479,12 @@ export function AgentEditor() {
     localName,
     localDescription,
     localPhase,
+    localResultType,
     localConnectionId,
     localImageConnectionId,
     localPrompt,
     localContextSize,
+    localMaxTokens,
     localRunInterval,
     localInjectAsSection,
     localEnabledTools,
@@ -370,6 +495,8 @@ export function AgentEditor() {
     localUseAvatarReferences,
     dbConfig,
     builtIn,
+    isCustomAgent,
+    isNewCustomAgent,
     isKnowledgeRetrievalAgent,
     updateAgent,
     createAgent,
@@ -422,7 +549,9 @@ export function AgentEditor() {
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 py-3 max-md:gap-2 max-md:px-3">
         <button
+          type="button"
           onClick={handleClose}
+          aria-label="Back to agents"
           className="rounded-xl p-2 transition-all hover:bg-[var(--accent)] active:scale-95"
         >
           <ArrowLeft size="1.125rem" />
@@ -510,6 +639,20 @@ export function AgentEditor() {
         </div>
       )}
 
+      {/* Both-knowledge-agents-configured warning. Both can run in parallel
+          without crashing, but they do overlapping work and bloat the prompt
+          with two injection blocks. The warning surfaces this so users either
+          choose one or knowingly accept the cost. */}
+      {bothKnowledgeAgentsConfigured && (
+        <div className="flex items-center gap-2 bg-amber-500/10 px-4 py-2 text-xs text-amber-400">
+          <AlertCircle size="0.8125rem" />
+          <span className="flex-1">
+            {isKnowledgeRouterAgent ? "Knowledge Retrieval" : "Knowledge Router"} is also configured. Both agents will
+            run in parallel and inject overlapping context. Consider disabling one for cleaner prompts.
+          </span>
+        </div>
+      )}
+
       {/* ── Body ── */}
       <div className="flex-1 overflow-y-auto p-6 max-md:p-4">
         <div className="mx-auto max-w-3xl space-y-6">
@@ -562,6 +705,49 @@ export function AgentEditor() {
             </div>
             <p className="mt-1.5 text-[0.625rem] text-[var(--muted-foreground)]">{phaseMeta.description}</p>
           </FieldGroup>
+
+          {(isCustomAgent || isNewCustomAgent) && (
+            <FieldGroup
+              label="Result Type"
+              icon={<FileText size="0.875rem" className="text-[var(--primary)]" />}
+              help="Controls how Marinara interprets this custom agent's output. Use Text Rewrite for post-processing agents that edit the generated reply."
+            >
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {CUSTOM_AGENT_RESULT_TYPE_OPTIONS.map((option) => {
+                  const isActive = localResultType === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => {
+                        setLocalResultType(option.id);
+                        if (option.id === "text_rewrite") setLocalPhase("post_processing");
+                        markDirty();
+                      }}
+                      className={cn(
+                        "flex flex-col items-start gap-1 rounded-xl p-3 text-left text-xs ring-1 transition-all",
+                        isActive
+                          ? "bg-[var(--primary)]/10 ring-[var(--primary)] text-[var(--foreground)]"
+                          : "ring-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]",
+                      )}
+                    >
+                      <span className="font-semibold">{option.label}</span>
+                      <span className="text-[0.625rem] leading-tight">{option.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {localResultType === "text_rewrite" && (
+                <p className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[0.625rem] leading-relaxed text-amber-200">
+                  Text rewrite agents always save as Post-Processing. Their prompt should return JSON like{" "}
+                  <code className="rounded bg-black/20 px-1 py-0.5">
+                    {'{"editedText":"...","changes":[{"description":"..."}]}'}
+                  </code>
+                  .
+                </p>
+              )}
+            </FieldGroup>
+          )}
 
           {/* ── Connection Override ── */}
           <FieldGroup
@@ -690,37 +876,140 @@ export function AgentEditor() {
             </FieldGroup>
           )}
 
-          {/* ── Context Size (hidden for Chat Summary — that uses the popover) ── */}
-          {!isChatSummaryAgent && (
-            <FieldGroup
-              label="Context Size"
-              icon={<Clock size="0.875rem" className="text-[var(--primary)]" />}
-              help="How many recent chat messages this agent receives as context. More messages = more context but higher token usage. Leave blank for the default (5 messages)."
-            >
-              <div className="flex items-center gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  max={200}
-                  value={localContextSize}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setLocalContextSize(v === "" ? "" : Math.max(1, Math.min(200, parseInt(v) || 1)));
-                    markDirty();
-                  }}
-                  placeholder="5"
-                  className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                />
-                <span className="text-[0.6875rem] text-[var(--muted-foreground)]">messages</span>
+          <FieldGroup
+            label="Agent Budget"
+            icon={<Clock size="0.875rem" className="text-[var(--primary)]" />}
+            help="Controls how much recent chat context the agent reads and how much output room it reserves. If max output is too high for the model context, prompt context can be trimmed."
+          >
+            <div className="grid gap-3 sm:grid-cols-2">
+              {!isChatSummaryAgent ? (
+                <div>
+                  <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                    Context Size
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={localContextSize}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setLocalContextSize(v === "" ? "" : Math.max(1, Math.min(200, parseInt(v) || 1)));
+                        markDirty();
+                      }}
+                      placeholder={String(DEFAULT_AGENT_CONTEXT_SIZE)}
+                      className="w-28 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                    />
+                    <span className="text-[0.6875rem] text-[var(--muted-foreground)]">messages</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl bg-[var(--accent)]/50 px-3 py-2.5 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+                  Chat Summary context size is managed in the Chat Summary panel inside each chat.
+                </div>
+              )}
+              <div>
+                <label className="mb-1 block text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                  Max Output Tokens
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="number"
+                    min={MIN_AGENT_MAX_TOKENS}
+                    max={MAX_AGENT_MAX_TOKENS}
+                    value={localMaxTokens}
+                    onChange={(e) => {
+                      setLocalMaxTokens(normalizeAgentMaxTokensInput(e.target.value));
+                      markDirty();
+                    }}
+                    onBlur={() => {
+                      if (localMaxTokens !== "") {
+                        setLocalMaxTokens(clampAgentMaxTokens(localMaxTokens));
+                      }
+                    }}
+                    placeholder={String(DEFAULT_AGENT_MAX_TOKENS)}
+                    className="w-32 rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  />
+                  <span className="text-[0.6875rem] text-[var(--muted-foreground)]">tokens</span>
+                </div>
               </div>
+            </div>
+            {!isChatSummaryAgent && (
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 Each agent only sees its own context size. When agents are batched together (same model), the highest
-                context size in the batch is used.
+                context size in the batch is used and output budgets are combined.
               </p>
+            )}
+            <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+              For 8k local models, try {DEFAULT_AGENT_MAX_TOKENS.toLocaleString()} or lower so the agent prompt keeps
+              enough room.
+            </p>
+          </FieldGroup>
+
+          {/* ── Triggers After (Chat Summary agent) ── */}
+          {(isCustomAgent || isNewCustomAgent) && customRunIntervalMeta && (
+            <FieldGroup
+              label={customRunIntervalMeta.label}
+              icon={<Clock size="0.875rem" className="text-[var(--primary)]" />}
+              help={customRunIntervalMeta.help}
+            >
+              <div className="flex items-center gap-3">
+                <div className="relative w-28">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={
+                      customCadenceInputFocused ? String(localRunInterval) : getCadenceInputValue(localRunInterval)
+                    }
+                    onFocus={(e) => {
+                      setCustomCadenceInputFocused(true);
+                      e.target.select();
+                    }}
+                    onBlur={() => setCustomCadenceInputFocused(false)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+                      e.preventDefault();
+                      const delta = e.key === "ArrowUp" ? 1 : -1;
+                      setLocalRunInterval(stepCadenceValue(localRunInterval, delta, customRunIntervalMeta.max));
+                      markDirty();
+                    }}
+                    onChange={(e) => {
+                      setLocalRunInterval(parseOptionalCadenceInputValue(e.target.value, customRunIntervalMeta.max));
+                      markDirty();
+                    }}
+                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 pr-8 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  />
+                  <div className="absolute right-1 top-1/2 flex -translate-y-1/2 flex-col overflow-hidden rounded-md">
+                    <button
+                      type="button"
+                      aria-label="Increase trigger cadence"
+                      onClick={() => {
+                        setLocalRunInterval(stepCadenceValue(localRunInterval, 1, customRunIntervalMeta.max));
+                        markDirty();
+                      }}
+                      className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    >
+                      <ChevronUp size="0.6875rem" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Decrease trigger cadence"
+                      onClick={() => {
+                        setLocalRunInterval(stepCadenceValue(localRunInterval, -1, customRunIntervalMeta.max));
+                        markDirty();
+                      }}
+                      className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    >
+                      <ChevronDown size="0.6875rem" />
+                    </button>
+                  </div>
+                </div>
+                <span className="text-[0.6875rem] text-[var(--muted-foreground)]">{customRunIntervalMeta.unit}</span>
+              </div>
             </FieldGroup>
           )}
 
-          {/* ── Triggers After (Chat Summary agent) ── */}
           {isChatSummaryAgent && (
             <FieldGroup
               label="Triggers After"
@@ -894,6 +1183,7 @@ export function AgentEditor() {
                     onClick={async () => {
                       if (!localSpotifyClientId.trim() || !dbConfig?.id) return;
                       setSpotifyConnecting(true);
+                      setSpotifyConnectError(null);
                       try {
                         // Save clientId first if dirty
                         if (dirty) {
@@ -915,48 +1205,53 @@ export function AgentEditor() {
                             agentId: dbConfig.id,
                           })}`,
                         );
-                        const data = await res.json();
-                        if (data.authUrl) {
-                          window.open(data.authUrl, "_blank", "width=500,height=700");
-                          // Clear any existing poll before starting a new one
-                          if (spotifyPollRef.current) clearInterval(spotifyPollRef.current);
-                          if (spotifyTimeoutRef.current) clearTimeout(spotifyTimeoutRef.current);
-                          // Poll for connection status
-                          spotifyPollRef.current = setInterval(async () => {
-                            try {
-                              const statusRes = await fetch(
-                                `/api/spotify/status?agentId=${encodeURIComponent(dbConfig.id)}`,
-                              );
-                              const status = await statusRes.json();
-                              if (status.connected) {
-                                clearInterval(spotifyPollRef.current!);
-                                spotifyPollRef.current = null;
-                                if (spotifyTimeoutRef.current) {
-                                  clearTimeout(spotifyTimeoutRef.current);
-                                  spotifyTimeoutRef.current = null;
-                                }
-                                setSpotifyStatus({
-                                  connected: true,
-                                  expired: false,
-                                  redirectUri: status.redirectUri ?? null,
-                                });
-                                setSpotifyConnecting(false);
-                              }
-                            } catch {
-                              // keep polling
-                            }
-                          }, 2000);
-                          // Stop polling after 5 minutes
-                          spotifyTimeoutRef.current = setTimeout(() => {
-                            if (spotifyPollRef.current) {
-                              clearInterval(spotifyPollRef.current);
-                              spotifyPollRef.current = null;
-                            }
-                            spotifyTimeoutRef.current = null;
-                            setSpotifyConnecting(false);
-                          }, 5 * 60_000);
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok || !data.authUrl) {
+                          throw new Error(data.error ?? `Authorize request failed (${res.status})`);
                         }
-                      } catch {
+                        window.open(data.authUrl, "_blank", "width=500,height=700");
+                        // Clear any existing poll before starting a new one
+                        if (spotifyPollRef.current) clearInterval(spotifyPollRef.current);
+                        if (spotifyTimeoutRef.current) clearTimeout(spotifyTimeoutRef.current);
+                        // Poll for connection status
+                        spotifyPollRef.current = setInterval(async () => {
+                          try {
+                            const statusRes = await fetch(
+                              `/api/spotify/status?agentId=${encodeURIComponent(dbConfig.id)}`,
+                            );
+                            const status = await statusRes.json();
+                            if (status.connected) {
+                              clearInterval(spotifyPollRef.current!);
+                              spotifyPollRef.current = null;
+                              if (spotifyTimeoutRef.current) {
+                                clearTimeout(spotifyTimeoutRef.current);
+                                spotifyTimeoutRef.current = null;
+                              }
+                              setSpotifyStatus({
+                                connected: true,
+                                expired: false,
+                                redirectUri: status.redirectUri ?? null,
+                              });
+                              setSpotifyConnecting(false);
+                              setSpotifyPasteOpen(false);
+                              setSpotifyPasteValue("");
+                              setSpotifyPasteError(null);
+                            }
+                          } catch {
+                            // keep polling
+                          }
+                        }, 2000);
+                        // Stop polling after the server-side pendingAuth TTL
+                        spotifyTimeoutRef.current = setTimeout(() => {
+                          if (spotifyPollRef.current) {
+                            clearInterval(spotifyPollRef.current);
+                            spotifyPollRef.current = null;
+                          }
+                          spotifyTimeoutRef.current = null;
+                          setSpotifyConnecting(false);
+                        }, 10 * 60_000);
+                      } catch (err) {
+                        setSpotifyConnectError(err instanceof Error ? err.message : "Failed to start Spotify auth");
                         setSpotifyConnecting(false);
                       }
                     }}
@@ -970,6 +1265,96 @@ export function AgentEditor() {
                     <Music size="0.875rem" />
                     {spotifyConnecting ? "Waiting for authorization..." : "Connect Spotify Account"}
                   </button>
+                )}
+
+                {spotifyConnectError && !spotifyStatus?.connected && (
+                  <p className="text-[0.6875rem] text-red-400/80">{spotifyConnectError}</p>
+                )}
+
+                {/* Paste-back fallback for installs where the browser can't reach the loopback callback. */}
+                {spotifyConnecting && !spotifyStatus?.connected && dbConfig?.id && (
+                  <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[0.6875rem] text-white/50 space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => setSpotifyPasteOpen((v) => !v)}
+                      className="text-white/60 hover:text-white/80 transition-colors text-left w-full"
+                    >
+                      {spotifyPasteOpen ? "▾" : "▸"} Browser couldn&apos;t reach the callback?
+                    </button>
+                    {spotifyPasteOpen && (
+                      <div className="space-y-2 pt-1">
+                        <p className="text-white/40 leading-relaxed">
+                          If you&apos;re running Marinara on a different machine, the popup probably failed to load
+                          (Spotify only allows <code className="text-white/50">127.0.0.1</code> or HTTPS callbacks).
+                          Copy the full URL from the popup&apos;s address bar and paste it here:
+                        </p>
+                        <textarea
+                          value={spotifyPasteValue}
+                          onChange={(e) => {
+                            setSpotifyPasteValue(e.target.value);
+                            setSpotifyPasteError(null);
+                          }}
+                          rows={3}
+                          placeholder="http://127.0.0.1:7860/api/spotify/callback?code=...&state=..."
+                          className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[0.6875rem] text-white placeholder-white/20 outline-none focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20 font-mono"
+                        />
+                        {spotifyPasteError && <p className="text-red-400/80 text-[0.625rem]">{spotifyPasteError}</p>}
+                        <button
+                          type="button"
+                          disabled={!spotifyPasteValue.trim() || spotifyPasteSubmitting}
+                          onClick={async () => {
+                            if (!dbConfig?.id || !spotifyPasteValue.trim()) return;
+                            setSpotifyPasteSubmitting(true);
+                            setSpotifyPasteError(null);
+                            try {
+                              const res = await fetch("/api/spotify/exchange", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ callbackUrl: spotifyPasteValue.trim() }),
+                              });
+                              const data = await res.json().catch(() => ({}));
+                              if (!res.ok || !data.success) {
+                                setSpotifyPasteError(data.error ?? `Request failed (${res.status})`);
+                              } else {
+                                if (spotifyPollRef.current) {
+                                  clearInterval(spotifyPollRef.current);
+                                  spotifyPollRef.current = null;
+                                }
+                                if (spotifyTimeoutRef.current) {
+                                  clearTimeout(spotifyTimeoutRef.current);
+                                  spotifyTimeoutRef.current = null;
+                                }
+                                const statusRes = await fetch(
+                                  `/api/spotify/status?agentId=${encodeURIComponent(dbConfig.id)}`,
+                                );
+                                const status = await statusRes.json().catch(() => null);
+                                setSpotifyStatus({
+                                  connected: status?.connected ?? true,
+                                  expired: status?.expired ?? false,
+                                  redirectUri: status?.redirectUri ?? null,
+                                });
+                                setSpotifyConnecting(false);
+                                setSpotifyPasteOpen(false);
+                                setSpotifyPasteValue("");
+                              }
+                            } catch (err) {
+                              setSpotifyPasteError(err instanceof Error ? err.message : "Submission failed");
+                            } finally {
+                              setSpotifyPasteSubmitting(false);
+                            }
+                          }}
+                          className={cn(
+                            "rounded-lg px-3 py-1.5 text-[0.6875rem] font-medium transition-all",
+                            spotifyPasteValue.trim() && !spotifyPasteSubmitting
+                              ? "bg-[#1DB954] text-white hover:bg-[#1ed760] active:scale-95"
+                              : "bg-white/5 text-white/30 cursor-not-allowed",
+                          )}
+                        >
+                          {spotifyPasteSubmitting ? "Submitting..." : "Complete connection"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 {/* Setup instructions */}
@@ -991,7 +1376,7 @@ export function AgentEditor() {
                     <li>
                       In Redirect URIs, add:{" "}
                       <code className="text-white/50 select-all">
-                        {spotifyStatus?.redirectUri ?? `http://127.0.0.1:7860/api/spotify/callback`}
+                        {spotifyStatus?.redirectUri ?? getDisplayedSpotifyRedirectUri()}
                       </code>
                     </li>
                     <li>
@@ -1003,6 +1388,13 @@ export function AgentEditor() {
                   </ol>
                   <p className="text-[0.625rem] text-white/30 mt-1">
                     Requires Spotify Premium. Tokens refresh automatically — no need to reconnect.
+                  </p>
+                  <p className="text-[0.625rem] text-white/30 leading-relaxed">
+                    Spotify only accepts <code className="text-white/40">https://</code> redirect URIs or loopback (
+                    <code className="text-white/40">http://127.0.0.1</code>). If you&apos;re running Marinara on another
+                    machine over plain HTTP, register the loopback URI anyway and use the paste-back fallback that
+                    appears under the Connect button — or set{" "}
+                    <code className="text-white/40">SPOTIFY_REDIRECT_URI</code> to your HTTPS URL.
                   </p>
                 </div>
               </div>
@@ -1023,9 +1415,49 @@ export function AgentEditor() {
               <div className="space-y-4">
                 {/* ── Lorebooks ── */}
                 <div className="space-y-1.5">
-                  <p className="text-[0.6875rem] font-medium text-white/60">Lorebooks</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">Lorebooks</p>
+                    {/* Description coverage badge — Knowledge Router only.
+                        Tells the user how many entries in their selected source lorebooks
+                        have descriptions filled in. Routing precision drops sharply when
+                        coverage is low because the router falls back to content snippets.
+                        Hidden during loading and on fetch errors (showing partial data
+                        from succeeded queries would silently mislead the user about
+                        coverage). Distinguishes the zero-entries case from loading by
+                        rendering an explicit "No entries yet" pill. */}
+                    {isKnowledgeRouterAgent &&
+                      descriptionCoverage &&
+                      !routerEntriesLoading &&
+                      !routerEntriesError &&
+                      (descriptionCoverage.total === 0 ? (
+                        <div className="flex items-center gap-1.5 text-[0.625rem]">
+                          <div className="h-1.5 w-1.5 rounded-full bg-[var(--muted-foreground)] opacity-50" />
+                          <span className="text-[var(--muted-foreground)]">No entries yet</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-[0.625rem]">
+                          <div
+                            className={cn(
+                              "h-1.5 w-1.5 rounded-full",
+                              descriptionCoverage.ratio >= 0.75
+                                ? "bg-emerald-400"
+                                : descriptionCoverage.ratio >= 0.25
+                                  ? "bg-amber-400"
+                                  : "bg-red-400",
+                            )}
+                          />
+                          <span className="text-[var(--muted-foreground)]">
+                            {Math.round(descriptionCoverage.ratio * 100)}% described
+                            <span className="opacity-70">
+                              {" "}
+                              ({descriptionCoverage.withDescription}/{descriptionCoverage.total})
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                  </div>
                   {allLorebooks && allLorebooks.length > 0 ? (
-                    <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-white/10 bg-white/[0.02] p-2">
+                    <div className="max-h-48 overflow-y-auto space-y-1 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 p-2">
                       {allLorebooks.map((lb) => {
                         const selected = localSourceLorebookIds.includes(lb.id);
                         return (
@@ -1042,13 +1474,15 @@ export function AgentEditor() {
                               "w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all text-xs",
                               selected
                                 ? "bg-amber-500/10 border border-amber-500/20 text-amber-300"
-                                : "bg-white/[0.02] border border-transparent text-white/60 hover:bg-white/5 hover:text-white/80",
+                                : "bg-[var(--secondary)] border border-transparent text-[var(--foreground)] hover:bg-[var(--accent)]",
                             )}
                           >
                             <div
                               className={cn(
                                 "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all",
-                                selected ? "border-amber-500/50 bg-amber-500/20" : "border-white/20 bg-white/5",
+                                selected
+                                  ? "border-amber-500/50 bg-amber-500/20"
+                                  : "border-[var(--border)] bg-[var(--background)]",
                               )}
                             >
                               {selected && <Check size="0.625rem" />}
@@ -1056,7 +1490,9 @@ export function AgentEditor() {
                             <div className="min-w-0 flex-1">
                               <p className="truncate font-medium">{lb.name}</p>
                               {lb.description && (
-                                <p className="truncate text-[0.625rem] text-white/40">{lb.description}</p>
+                                <p className="truncate text-[0.625rem] text-[var(--muted-foreground)]">
+                                  {lb.description}
+                                </p>
                               )}
                             </div>
                           </button>
@@ -1064,7 +1500,17 @@ export function AgentEditor() {
                       })}
                     </div>
                   ) : (
-                    <p className="text-[0.625rem] text-white/40">No lorebooks available.</p>
+                    <p className="text-[0.625rem] text-[var(--muted-foreground)]">No lorebooks available.</p>
+                  )}
+                  {/* Router-only tip explaining the description fallback behavior.
+                      Without this, users have no way to know that filling in entry
+                      descriptions improves routing precision — the fallback to a
+                      content snippet works invisibly. */}
+                  {isKnowledgeRouterAgent && localSourceLorebookIds.length > 0 && (
+                    <p className="text-[0.625rem] italic text-[var(--muted-foreground)]">
+                      Tip: entries without a description fall back to a short content snippet. Adding tight one-line
+                      descriptions to your most important entries improves routing precision.
+                    </p>
                   )}
                 </div>
 
@@ -1258,7 +1704,9 @@ export function AgentEditor() {
             <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
               {builtIn
                 ? "Leave empty to use the built-in default prompt. Edit to override with your own instructions."
-                : "Write the full system prompt for this custom agent."}
+                : localResultType === "text_rewrite"
+                  ? 'Write the full system prompt for this custom editor. It must return JSON with "editedText" and "changes".'
+                  : "Write the full system prompt for this custom agent."}
             </p>
 
             {/* Default prompt preview removed — now shown inline above */}
@@ -1289,7 +1737,7 @@ export function AgentEditor() {
                 />
               ))}
               {(customToolsRaw as CustomToolRow[] | undefined)
-                ?.filter((t) => t.enabled === "true")
+                ?.filter((tool) => isCustomToolSelectable(tool, customToolCapabilities))
                 .map((tool) => (
                   <ToolCard
                     key={tool.name}
@@ -1324,6 +1772,13 @@ export function AgentEditor() {
               <p>
                 <strong className="text-[var(--foreground)]">Phase:</strong> {phaseMeta.label} — {phaseMeta.description}
               </p>
+              {(isCustomAgent || isNewCustomAgent) && (
+                <p>
+                  <strong className="text-[var(--foreground)]">Result Type:</strong>{" "}
+                  {CUSTOM_AGENT_RESULT_TYPE_OPTIONS.find((option) => option.id === localResultType)?.label ??
+                    localResultType}
+                </p>
+              )}
               <p>
                 <strong className="text-[var(--foreground)]">DB Status:</strong>{" "}
                 {dbConfig ? `Persisted (ID: ${dbConfig.id})` : "Not yet saved — click Save to persist"}

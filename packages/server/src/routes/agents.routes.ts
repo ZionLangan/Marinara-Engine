@@ -4,12 +4,34 @@
 import type { FastifyInstance } from "fastify";
 import { createAgentConfigSchema, updateAgentConfigSchema, BUILT_IN_AGENTS } from "@marinara-engine/shared";
 import { createAgentsStorage } from "../services/storage/agents.storage.js";
+import { z } from "zod";
+
+const updateAgentRunSchema = z.object({
+  resultData: z.unknown(),
+});
 
 export async function agentsRoutes(app: FastifyInstance) {
   const storage = createAgentsStorage(app.db);
 
   app.get("/", async () => {
     return storage.list();
+  });
+
+  /** Get editable custom-agent outputs for a roleplay chat. */
+  app.get<{ Params: { chatId: string }; Querystring: { limit?: string } }>("/runs/:chatId/custom", async (req) => {
+    const parsedLimit = req.query.limit ? Number.parseInt(req.query.limit, 10) : undefined;
+    return storage.listCustomRunsForChat(req.params.chatId, parsedLimit);
+  });
+
+  /** Edit the persisted output of a custom agent run. */
+  app.patch<{ Params: { runId: string } }>("/runs/:runId", async (req, reply) => {
+    const input = updateAgentRunSchema.parse(req.body);
+    const run = await storage.getRunWithConfig(req.params.runId);
+    if (!run) return reply.status(404).send({ error: "Agent run not found" });
+    if (BUILT_IN_AGENTS.some((agent) => agent.id === run.agentType)) {
+      return reply.status(403).send({ error: "Built-in agent runs are not editable here" });
+    }
+    return storage.updateRunResultData(req.params.runId, input.resultData);
   });
 
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {

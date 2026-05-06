@@ -178,6 +178,7 @@ function StreamingIndicator({
   groupChatMode?: string;
 }) {
   const streamBuffer = useChatStore((s) => s.streamBuffer);
+  const thinkingBuffer = useChatStore((s) => s.thinkingBuffer);
   const streamingCharacterId = useChatStore((s) => s.streamingCharacterId);
 
   return (
@@ -188,9 +189,15 @@ function StreamingIndicator({
           chatId: activeChatId,
           role: "assistant",
           characterId: streamingCharacterId ?? chatCharIds[0] ?? null,
-          content: streamBuffer || "",
+          content: streamBuffer || (thinkingBuffer ? "Thinking..." : ""),
           activeSwipeIndex: 0,
-          extra: { displayText: null, isGenerated: true, tokenCount: 0, generationInfo: null },
+          extra: {
+            displayText: null,
+            isGenerated: true,
+            tokenCount: 0,
+            generationInfo: null,
+            thinking: thinkingBuffer || null,
+          },
           createdAt: new Date().toISOString(),
         }}
         isStreaming
@@ -211,11 +218,18 @@ function RegeneratingMessageContent({
   msg: MessageWithSwipes;
 } & Omit<ComponentProps<typeof ChatMessage>, "message" | "isStreaming">) {
   const streamBuffer = useChatStore((s) => s.streamBuffer);
+  const thinkingBuffer = useChatStore((s) => s.thinkingBuffer);
   // Strip old-swipe attachments so a previous illustration doesn't linger
   // while the new swipe's text is streaming in.
   const parsedExtra = typeof msg.extra === "string" ? JSON.parse(msg.extra) : (msg.extra ?? {});
-  const cleanExtra = { ...parsedExtra, attachments: null };
-  return <ChatMessage message={{ ...msg, extra: cleanExtra, content: streamBuffer || "" }} isStreaming {...rest} />;
+  const cleanExtra = { ...parsedExtra, attachments: null, thinking: thinkingBuffer || parsedExtra.thinking };
+  return (
+    <ChatMessage
+      message={{ ...msg, extra: cleanExtra, content: streamBuffer || (thinkingBuffer ? "Thinking..." : "") }}
+      isStreaming
+      {...rest}
+    />
+  );
 }
 
 /** True for stored context messages that should feed generation but not render in the transcript. */
@@ -270,6 +284,7 @@ function ToolbarMenu({ children }: { children: ReactNode }) {
     if (!open) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as Node;
+      if (target instanceof Element && target.closest("[data-chat-branch-popover]")) return;
       if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return;
       setOpen(false);
     };
@@ -561,6 +576,8 @@ type RoleplaySurfaceProps = {
   spriteCharacterIds: string[];
   spriteExpressions: Record<string, string>;
   spritePlacements: Record<string, SpritePlacement>;
+  spriteScale: number;
+  spriteOpacity: number;
   hasCustomSpritePlacements: boolean;
   spriteArrangeMode: boolean;
   enabledAgentTypes: Set<string>;
@@ -599,6 +616,7 @@ type RoleplaySurfaceProps = {
   onEdit: (messageId: string, content: string) => void;
   onSetActiveSwipe: (messageId: string, index: number) => void;
   onToggleConversationStart: (messageId: string, current: boolean) => void;
+  onToggleHiddenFromAI: (messageId: string, current: boolean) => void;
   onPeekPrompt: () => void;
   onBranch?: (messageId: string) => void;
   onCloneSceneFromHere?: (messageId: string) => void;
@@ -606,6 +624,7 @@ type RoleplaySurfaceProps = {
   onToggleSelectMessage: (toggle: MessageSelectionToggle) => void;
   onSummaryContextSizeChange: (size: number) => void;
   onRerunTrackers: () => void;
+  onRerunSingleTracker: (agentType: string) => void;
   onRetryFailedAgents?: () => void;
   onStartEncounter: () => void;
   onConcludeScene: () => void;
@@ -656,6 +675,8 @@ export function ChatRoleplaySurface({
   spriteCharacterIds,
   spriteExpressions,
   spritePlacements,
+  spriteScale,
+  spriteOpacity,
   hasCustomSpritePlacements,
   spriteArrangeMode,
   enabledAgentTypes,
@@ -694,6 +715,7 @@ export function ChatRoleplaySurface({
   onEdit,
   onSetActiveSwipe,
   onToggleConversationStart,
+  onToggleHiddenFromAI,
   onPeekPrompt,
   onBranch,
   onCloneSceneFromHere,
@@ -701,6 +723,7 @@ export function ChatRoleplaySurface({
   onToggleSelectMessage,
   onSummaryContextSizeChange,
   onRerunTrackers,
+  onRerunSingleTracker,
   onRetryFailedAgents,
   onStartEncounter,
   onConcludeScene,
@@ -755,6 +778,8 @@ export function ChatRoleplaySurface({
               spriteExpressions={spriteExpressions}
               spritePlacements={spritePlacements}
               editing={spriteArrangeMode}
+              spriteScale={spriteScale}
+              spriteOpacity={spriteOpacity}
               onExpressionChange={onExpressionChange}
               onPlacementChange={onSpritePlacementChange}
             />
@@ -777,8 +802,10 @@ export function ChatRoleplaySurface({
                         chatId={chat.id}
                         characterCount={chatCharIds.length}
                         layout="top"
+                        isStreaming={isStreaming}
                         onRetriggerTrackers={onRerunTrackers}
                         onRetryFailedAgents={onRetryFailedAgents}
+                        onRerunSingleTracker={onRerunSingleTracker}
                         enabledAgentTypes={enabledAgentTypes}
                         manualTrackers={!!chatMeta.manualTrackers}
                       />
@@ -853,21 +880,24 @@ export function ChatRoleplaySurface({
                         chatId={chat.id}
                         characterCount={chatCharIds.length}
                         layout="top"
+                        isStreaming={isStreaming}
                         onRetriggerTrackers={onRerunTrackers}
                         onRetryFailedAgents={onRetryFailedAgents}
+                        onRerunSingleTracker={onRerunSingleTracker}
                         enabledAgentTypes={enabledAgentTypes}
                         manualTrackers={!!chatMeta.manualTrackers}
                         mobileCompact
                       />
                     </Suspense>
                     <div className="flex items-center gap-1.5">
-                      <ChatBranchSelector
-                        activeChatId={activeChatId}
-                        activeChatName={chat?.name}
-                        groupId={chat?.groupId ?? null}
-                        variant="roleplay"
-                      />
                       <ToolbarMenu>
+                        <ChatBranchSelector
+                          activeChatId={activeChatId}
+                          activeChatName={chat?.name}
+                          groupId={chat?.groupId ?? null}
+                          variant="roleplay"
+                          compact
+                        />
                         <SummaryButton
                           chatId={chat?.id ?? null}
                           summary={chatMeta.summary ?? null}
@@ -918,13 +948,14 @@ export function ChatRoleplaySurface({
                 )}
                 {chat && !chatMeta.enableAgents && (
                   <div className="flex w-full items-center justify-end gap-1.5 px-2 pb-1 pt-2">
-                    <ChatBranchSelector
-                      activeChatId={activeChatId}
-                      activeChatName={chat?.name}
-                      groupId={chat?.groupId ?? null}
-                      variant="roleplay"
-                    />
                     <ToolbarMenu>
+                      <ChatBranchSelector
+                        activeChatId={activeChatId}
+                        activeChatName={chat?.name}
+                        groupId={chat?.groupId ?? null}
+                        variant="roleplay"
+                        compact
+                      />
                       <SummaryButton
                         chatId={chat?.id ?? null}
                         summary={chatMeta.summary ?? null}
@@ -1016,6 +1047,7 @@ export function ChatRoleplaySurface({
                           onEdit={onEdit}
                           onSetActiveSwipe={onSetActiveSwipe}
                           onToggleConversationStart={onToggleConversationStart}
+                          onToggleHiddenFromAI={onToggleHiddenFromAI}
                           onPeekPrompt={onPeekPrompt}
                           onBranch={onBranch}
                           onCloneSceneFromHere={onCloneSceneFromHere}
@@ -1043,6 +1075,7 @@ export function ChatRoleplaySurface({
                           onEdit={onEdit}
                           onSetActiveSwipe={onSetActiveSwipe}
                           onToggleConversationStart={onToggleConversationStart}
+                          onToggleHiddenFromAI={onToggleHiddenFromAI}
                           onPeekPrompt={onPeekPrompt}
                           onBranch={onBranch}
                           onCloneSceneFromHere={onCloneSceneFromHere}
@@ -1118,17 +1151,20 @@ export function ChatRoleplaySurface({
                   }
                   chatCharacters={
                     chatCharIds.length > 1
-                      ? chatCharIds.map((id) => {
-                          const info = characterMap.get(id);
-                          return {
-                            id,
-                            name: info?.name ?? "Unknown",
-                            avatarUrl: info?.avatarUrl ?? null,
-                            avatarCrop: info?.avatarCrop ?? null,
-                          };
-                        })
+                      ? chatCharIds
+                          .filter((id) => characterMap.has(id))
+                          .map((id) => {
+                            const info = characterMap.get(id)!;
+                            return {
+                              id,
+                              name: info.name,
+                              avatarUrl: info.avatarUrl ?? null,
+                              avatarCrop: info.avatarCrop ?? null,
+                            };
+                          })
                       : undefined
                   }
+                  onPeekPrompt={onPeekPrompt}
                 />
               </div>
             </div>

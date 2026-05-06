@@ -10,6 +10,9 @@ import { registerRoutes } from "./routes/index.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { ipAllowlistHook } from "./middleware/ip-allowlist.js";
 import { basicAuthHook } from "./middleware/basic-auth.js";
+import { csrfProtectionHook } from "./middleware/csrf-protection.js";
+import { rateLimitHook } from "./middleware/rate-limit.js";
+import { securityHeadersHook } from "./middleware/security-headers.js";
 import { runMigrations } from "./db/migrate.js";
 import { seedDefaultPreset } from "./db/seed.js";
 import { seedProfessorMari } from "./db/seed-mari.js";
@@ -28,14 +31,15 @@ import {
   getCorsConfig,
   getLogLevel,
   getNodeEnv,
+  isFileStorageBackend,
   isAutoCreateDefaultConnectionDisabled,
 } from "./config/runtime-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
-import { migrateTaskbarShortcuts } from "./services/setup/taskbar-shortcut-migration.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const REVALIDATE_FILES = new Set(["index.html"]);
 const NO_STORE_FILES = new Set(["manifest.json", "sw.js", "registerSW.js"]);
+const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
 
 export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   const corsConfig = getCorsConfig();
@@ -44,7 +48,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       level: getLogLevel(),
       transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
     },
-    bodyLimit: 50 * 1024 * 1024, // 50 MB — needed for PNG character cards with embedded avatar
+    bodyLimit: MAX_UPLOAD_BYTES, // Large profile imports can include many base64 avatars.
     ...(https && { https }),
   });
 
@@ -53,7 +57,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   await app.register(multipart, {
     limits: {
-      fileSize: 50 * 1024 * 1024, // 50 MB max upload
+      fileSize: MAX_UPLOAD_BYTES,
     },
   });
 
@@ -70,8 +74,10 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
     }
   });
 
-  // ── Migrations (add missing columns to existing tables) ──
-  await runMigrations(db);
+  // ── Legacy SQLite migrations (file-native storage imports old DBs without runtime migrations) ──
+  if (!isFileStorageBackend()) {
+    await runMigrations(db);
+  }
 
   // ── Seed defaults ──
   await seedDefaultPreset(db);
@@ -91,30 +97,20 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
   // ── Recover orphaned gallery images (files on disk without DB records) ──
   await recoverGalleryImages(db);
 
-  // ── One-time taskbar shortcut migration (Windows) ──
-  // Re-points the Start Menu / Desktop "Marinara Engine" shortcut at the
-  // bundled MarinaraLauncher.exe so pinning to the taskbar groups the
-  // running console under the pinned icon. Idempotent.
-  //
-  // Deferred off the boot path via setImmediate — the migration shells out
-  // to powershell.exe synchronously, and a hung COM call must not be able
-  // to delay the server starting to listen. setImmediate runs the work on
-  // the next event-loop tick, after `app.listen()` completes in index.ts.
-  setImmediate(() => {
-    try {
-      // app.ts compiles to <installDir>/packages/server/dist/app.js — three levels up from dist/.
-      const installDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-      migrateTaskbarShortcuts(installDir);
-    } catch (err) {
-      app.log.warn({ err }, "taskbar shortcut migration skipped");
-    }
-  });
+  // ── Security headers ──
+  app.addHook("onRequest", securityHeadersHook);
 
   // ── IP Allowlist ──
   app.addHook("onRequest", ipAllowlistHook);
 
+  // ── Lightweight API abuse throttling ──
+  app.addHook("onRequest", rateLimitHook);
+
   // ── HTTP Basic Auth ──
   app.addHook("onRequest", basicAuthHook);
+
+  // ── CSRF / Origin protection for unsafe API requests ──
+  app.addHook("onRequest", csrfProtectionHook);
 
   // ── Prevent caching of API JSON responses ──
   // Without explicit Cache-Control, browsers apply heuristic caching which

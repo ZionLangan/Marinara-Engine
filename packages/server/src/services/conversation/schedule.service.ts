@@ -90,6 +90,7 @@ export async function generateCharacterSchedule(
   characterDescription: string,
   characterPersonality: string,
   userSchedulePreferences?: string,
+  recentContinuityContext?: string,
 ): Promise<{ schedule: Omit<WeekSchedule, "weekStart">; raw: string }> {
   const systemPrompt = [
     `You are a schedule generator. Create a realistic weekly schedule for a character based on their personality and description.`,
@@ -98,6 +99,18 @@ export async function generateCharacterSchedule(
     `Description: ${characterDescription}`,
     `Personality: ${characterPersonality}`,
     ``,
+    ...(recentContinuityContext?.trim()
+      ? [
+          `Recent continuity:`,
+          `This is not the first schedule for this character. Use the following recent memories, summaries, and previous routine to update the new week.`,
+          `If recent events changed the character's job, school, health, relationship status, location, obligations, sleep pattern, or priorities, reflect those changes in the schedule.`,
+          `If the continuity does not imply a durable routine change, preserve the character's established lifestyle.`,
+          `<recent_continuity>`,
+          recentContinuityContext.trim(),
+          `</recent_continuity>`,
+          ``,
+        ]
+      : []),
     ...(userSchedulePreferences?.trim()
       ? [
           `User preferences:`,

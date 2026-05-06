@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────
-// Schema: Lorebooks & Entries
+// Schema: Lorebooks, Folders & Entries
 // ──────────────────────────────────────────────
 import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 
@@ -24,11 +24,42 @@ export const lorebooks = sqliteTable("lorebooks", {
   updatedAt: text("updated_at").notNull(),
 });
 
+/**
+ * Lorebook folders — collapsible containers that group entries to reduce
+ * visual clutter in the editor. Folders are flat in v1; `parentFolderId` is
+ * reserved (always null) for a future nested-folder PR. When a folder's
+ * `enabled` flag is "false", every entry whose `folderId` matches is
+ * excluded from activation regardless of the entry's own enabled flag —
+ * gating happens at `listActiveEntries` time, not by mutating entry rows.
+ */
+export const lorebookFolders = sqliteTable("lorebook_folders", {
+  id: text("id").primaryKey(),
+  lorebookId: text("lorebook_id")
+    .notNull()
+    .references(() => lorebooks.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  /** SQLite-style "true"/"false" string, matches the rest of this schema. */
+  enabled: text("enabled").notNull().default("true"),
+  /** Reserved for future nesting; always NULL in v1. */
+  parentFolderId: text("parent_folder_id"),
+  /** Display order among sibling folders (lower = higher in the list). */
+  order: integer("order").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const lorebookEntries = sqliteTable("lorebook_entries", {
   id: text("id").primaryKey(),
   lorebookId: text("lorebook_id")
     .notNull()
     .references(() => lorebooks.id, { onDelete: "cascade" }),
+  /**
+   * Folder this entry belongs to, or NULL for root-level. Not enforced as a
+   * foreign key in SQLite to keep folder deletion cheap (the storage layer
+   * sets entries' folderId back to null when a folder is removed instead of
+   * cascading the entries themselves).
+   */
+  folderId: text("folder_id"),
   name: text("name").notNull(),
   content: text("content").notNull().default(""),
   /** Short summary used by the knowledge-router agent to decide if this entry is relevant */
@@ -49,6 +80,23 @@ export const lorebookEntries = sqliteTable("lorebook_entries", {
   matchWholeWords: text("match_whole_words").notNull().default("false"),
   caseSensitive: text("case_sensitive").notNull().default("false"),
   useRegex: text("use_regex").notNull().default("false"),
+  characterFilterMode: text("character_filter_mode", { enum: ["any", "include", "exclude"] })
+    .notNull()
+    .default("any"),
+  /** JSON array of character IDs used by characterFilterMode */
+  characterFilterIds: text("character_filter_ids").notNull().default("[]"),
+  characterTagFilterMode: text("character_tag_filter_mode", { enum: ["any", "include", "exclude"] })
+    .notNull()
+    .default("any"),
+  /** JSON array of character-card tags used by characterTagFilterMode */
+  characterTagFilters: text("character_tag_filters").notNull().default("[]"),
+  generationTriggerFilterMode: text("generation_trigger_filter_mode", { enum: ["any", "include", "exclude"] })
+    .notNull()
+    .default("any"),
+  /** JSON array of generation trigger names */
+  generationTriggerFilters: text("generation_trigger_filters").notNull().default("[]"),
+  /** JSON array of non-chat matching sources */
+  additionalMatchingSources: text("additional_matching_sources").notNull().default("[]"),
 
   position: integer("position").notNull().default(0),
   depth: integer("depth").notNull().default(4),

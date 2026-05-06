@@ -2,11 +2,11 @@
 // Summaries Editor Modal — edit auto-generated day/week summaries
 // ──────────────────────────────────────────────
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { X, Plus, Trash2, CalendarClock, ChevronRight, ChevronsDownUp, ChevronsUpDown } from "lucide-react";
+import { X, Plus, Trash2, CalendarClock, ChevronRight, ChevronsDownUp, ChevronsUpDown, RefreshCw } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type { Chat, ChatMetadata, DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
 import { useQueryClient } from "@tanstack/react-query";
-import { chatKeys, useUpdateChatSummaries } from "../../hooks/use-chats";
+import { chatKeys, useBackfillConversationSummaries, useUpdateChatSummaries } from "../../hooks/use-chats";
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -119,8 +119,10 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
   const [drafts, setDrafts] = useState<Drafts>(() => cloneDrafts(metadata));
   const snapshotRef = useRef<Drafts>(drafts);
   const updateSummaries = useUpdateChatSummaries();
+  const backfillSummaries = useBackfillConversationSummaries();
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [backfillNotice, setBackfillNotice] = useState<string | null>(null);
 
   // Reinitialize drafts whenever the modal opens, refetching the chat first so
   // auto-summaries written during a prior generation show up without a page refresh.
@@ -140,7 +142,9 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
       setDrafts(fresh);
       snapshotRef.current = fresh;
       setExpanded(new Set());
+      setBackfillNotice(null);
       updateSummaries.reset();
+      backfillSummaries.reset();
     })();
     return () => {
       cancelled = true;
@@ -226,6 +230,42 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
     );
   };
 
+  const handleBackfill = () => {
+    if (isDirty || backfillSummaries.isPending) return;
+    setBackfillNotice(null);
+    backfillSummaries.mutate(
+      { chatId: chat.id, maxMissingDays: 14 },
+      {
+        onSuccess: async (result) => {
+          await qc.refetchQueries({ queryKey: chatKeys.detail(chat.id) });
+          const latest = qc.getQueryData<Chat>(chatKeys.detail(chat.id));
+          const latestMeta: ChatMetadata = latest
+            ? typeof latest.metadata === "string"
+              ? JSON.parse(latest.metadata)
+              : (latest.metadata ?? {})
+            : metadata;
+          const fresh = cloneDrafts(latestMeta);
+          setDrafts(fresh);
+          snapshotRef.current = fresh;
+
+          const added = result.generatedDays.length + result.consolidatedWeeks.length;
+          const failed = result.failedDays.length + result.failedWeeks.length;
+          const remaining = result.remainingMissingDayCount;
+          if (added === 0 && failed === 0 && remaining === 0) {
+            setBackfillNotice("No missing summaries found.");
+          } else {
+            const parts = [
+              added > 0 ? `Added ${added} ${added === 1 ? "summary" : "summaries"}` : "No summaries added",
+              remaining > 0 ? `${remaining} older ${remaining === 1 ? "day remains" : "days remain"}` : null,
+              failed > 0 ? `${failed} failed` : null,
+            ].filter(Boolean);
+            setBackfillNotice(parts.join(" · "));
+          }
+        },
+      },
+    );
+  };
+
   if (!open) return null;
 
   return (
@@ -260,6 +300,36 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
             Days from the current week are automatically consolidated into a weekly summary once the week ends. Edits to
             the current week&apos;s days may be rewritten by that consolidation.
+          </div>
+
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/20 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-[0.75rem] font-medium text-[var(--foreground)]">Missing Summaries</p>
+                <p className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
+                  Retry past days that failed or never received an automatic summary.
+                </p>
+              </div>
+              <button
+                onClick={handleBackfill}
+                disabled={isDirty || backfillSummaries.isPending}
+                title={isDirty ? "Save your edits before backfilling" : "Generate missing summaries"}
+                className="flex items-center gap-1.5 rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw size="0.75rem" className={cn(backfillSummaries.isPending && "animate-spin")} />
+                {backfillSummaries.isPending ? "Checking…" : "Backfill"}
+              </button>
+            </div>
+            {(backfillNotice || backfillSummaries.isError) && (
+              <p
+                className={cn(
+                  "mt-2 text-[0.625rem] leading-snug",
+                  backfillSummaries.isError ? "text-[var(--destructive)]" : "text-[var(--muted-foreground)]",
+                )}
+              >
+                {backfillSummaries.isError ? "Backfill failed — check the server log for details." : backfillNotice}
+              </p>
+            )}
           </div>
 
           {entries.length === 0 && (

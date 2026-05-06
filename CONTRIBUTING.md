@@ -7,7 +7,7 @@ This is the canonical contributor guide for Marinara Engine. Use it with `README
 | Layer    | Technology                                                     |
 | -------- | -------------------------------------------------------------- |
 | Frontend | React 19, Tailwind CSS v4, Framer Motion, Zustand, React Query |
-| Backend  | Fastify 5, Drizzle ORM, SQLite                                 |
+| Backend  | Fastify 5, file-backed storage, temporary SQL compatibility    |
 | PWA      | vite-plugin-pwa, Web App Manifest                              |
 | Shared   | TypeScript 5, Zod                                              |
 | Build    | Vite 6, pnpm workspaces                                        |
@@ -16,7 +16,7 @@ This is the canonical contributor guide for Marinara Engine. Use it with `README
 
 Prerequisites:
 
-- Node.js 20+
+- Node.js 24 LTS+
 - Git
 - pnpm via the repo-pinned `packageManager` if you are not using the launchers
 
@@ -27,7 +27,6 @@ git clone https://github.com/Pasta-Devs/Marinara-Engine.git
 cd Marinara-Engine
 pnpm install
 pnpm build
-pnpm db:push
 pnpm dev
 ```
 
@@ -43,7 +42,7 @@ Copy `.env.example` to `.env` when you need to change ports, HTTPS settings, or 
 ## Repo Layout
 
 - `packages/client/` — React frontend, PWA shell, and UI components
-- `packages/server/` — Fastify API, SQLite integration, migrations, importers, and AI agents
+- `packages/server/` — Fastify API, file-backed storage bridge, importers, and AI agents
 - `packages/shared/` — Shared types, schemas, constants, and `APP_VERSION`
 - `android/` — Android WebView wrapper for the Termux-served local app
 - `win/` — Windows installer sources and helper scripts
@@ -58,10 +57,11 @@ Baseline validation:
 pnpm check
 ```
 
+This runs the Impeccable project-context guard, workspace lint/type checks, and the production build.
+
 Useful follow-up checks:
 
 ```bash
-pnpm db:push
 pnpm version:check
 ```
 

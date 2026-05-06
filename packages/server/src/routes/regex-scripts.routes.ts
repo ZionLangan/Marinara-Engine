@@ -2,7 +2,7 @@
 // Routes: Regex Scripts
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
-import { createRegexScriptSchema, updateRegexScriptSchema } from "@marinara-engine/shared";
+import { createRegexScriptSchema, reorderRegexScriptsSchema, updateRegexScriptSchema } from "@marinara-engine/shared";
 import { createRegexScriptsStorage } from "../services/storage/regex-scripts.storage.js";
 
 export async function regexScriptsRoutes(app: FastifyInstance) {
@@ -10,6 +10,11 @@ export async function regexScriptsRoutes(app: FastifyInstance) {
 
   app.get("/", async () => {
     return storage.list();
+  });
+
+  app.put("/reorder", async (req) => {
+    const input = reorderRegexScriptsSchema.parse(req.body);
+    return storage.reorder(input.scriptIds);
   });
 
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {

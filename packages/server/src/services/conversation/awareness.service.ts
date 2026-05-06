@@ -6,9 +6,10 @@
 // so the character naturally "remembers" what's happening elsewhere.
 // ──────────────────────────────────────────────
 
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { DB } from "../../db/connection.js";
 import { chats, messages } from "../../db/schema/index.js";
+import { createCharactersStorage } from "../storage/characters.storage.js";
 
 // ── Temporal keyword patterns ──
 // Maps regex patterns in the user's message to time windows to pull from.
@@ -97,6 +98,7 @@ interface ChatRow {
   name: string;
   characterIds: string;
   mode: string;
+  personaId: string | null;
 }
 
 interface MessageRow {
@@ -169,22 +171,25 @@ export async function buildAwarenessBlock(
 
   // 1. Find all OTHER conversation chats that share at least one character
   const siblingChats: ChatRow[] = [];
+  const conversationChats = await db
+    .select({
+      id: chats.id,
+      name: chats.name,
+      characterIds: chats.characterIds,
+      mode: chats.mode,
+      personaId: chats.personaId,
+    })
+    .from(chats)
+    .where(eq(chats.mode, "conversation"));
   for (const charId of characterIds) {
-    const rows = await db
-      .select({
-        id: chats.id,
-        name: chats.name,
-        characterIds: chats.characterIds,
-        mode: chats.mode,
-      })
-      .from(chats)
-      .where(
-        and(
-          sql`EXISTS (SELECT 1 FROM json_each(${chats.characterIds}) WHERE value = ${charId})`,
-          eq(chats.mode, "conversation"),
-        ),
-      );
-    for (const r of rows) {
+    for (const r of conversationChats) {
+      let chatCharacterIds: string[] = [];
+      try {
+        chatCharacterIds = JSON.parse(r.characterIds);
+      } catch {
+        chatCharacterIds = [];
+      }
+      if (!chatCharacterIds.includes(charId)) continue;
       if (r.id !== currentChatId && !siblingChats.some((s) => s.id === r.id)) {
         siblingChats.push(r);
       }
@@ -197,19 +202,30 @@ export async function buildAwarenessBlock(
   const rawWindows = detectTimeWindows(userMessage);
   const windows = mergeWindows(rawWindows);
 
-  // Build WHERE clauses for time windows
-  const windowConditions = windows.map(
-    (w) => `(created_at >= '${w.start.toISOString()}' AND created_at <= '${w.end.toISOString()}')`,
-  );
-  const timeFilter = windowConditions.join(" OR ");
+  const isWithinRequestedWindow = (createdAt: string) => {
+    const timestamp = new Date(createdAt).getTime();
+    return windows.some((window) => timestamp >= window.start.getTime() && timestamp <= window.end.getTime());
+  };
 
   // 3. Pull messages from sibling chats within the time windows
-  const chatMessages = new Map<string, { chatName: string; members: string[]; messages: MessageRow[] }>();
+  const charStorage = createCharactersStorage(db);
+  const personas = await charStorage.listPersonas();
+  const activePersona = personas.find((persona) => persona.isActive === "true");
+  const resolveChatPersonaName = (chat: ChatRow): string => {
+    const persona = chat.personaId ? personas.find((entry) => entry.id === chat.personaId) : activePersona;
+    return persona?.name || userName;
+  };
+
+  const chatMessages = new Map<
+    string,
+    { chatName: string; members: string[]; userName: string; messages: MessageRow[] }
+  >();
 
   for (const chat of siblingChats) {
     const charIds: string[] = JSON.parse(chat.characterIds);
     const memberNames = charIds.map((id) => characterNames.get(id) ?? "Unknown");
-    memberNames.push(userName);
+    const chatUserName = resolveChatPersonaName(chat);
+    memberNames.push(chatUserName);
 
     const rows = (await db
       .select({
@@ -221,14 +237,16 @@ export async function buildAwarenessBlock(
         createdAt: messages.createdAt,
       })
       .from(messages)
-      .where(and(eq(messages.chatId, chat.id), sql.raw(`(${timeFilter})`)))
+      .where(eq(messages.chatId, chat.id))
       .orderBy(messages.createdAt)) as MessageRow[];
+    const filteredRows = rows.filter((row) => isWithinRequestedWindow(row.createdAt));
 
-    if (rows.length > 0) {
+    if (filteredRows.length > 0) {
       chatMessages.set(chat.id, {
         chatName: chat.name,
         members: memberNames,
-        messages: rows,
+        userName: chatUserName,
+        messages: filteredRows,
       });
     }
   }
@@ -271,7 +289,7 @@ export async function buildAwarenessBlock(
       for (const msg of burst) {
         const senderName =
           msg.role === "user"
-            ? userName
+            ? data.userName
             : msg.characterId
               ? (characterNames.get(msg.characterId) ?? "Unknown")
               : "Unknown";

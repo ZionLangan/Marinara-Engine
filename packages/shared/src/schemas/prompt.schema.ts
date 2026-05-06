@@ -45,6 +45,8 @@ export const generationParametersSchema = z.object({
   presencePenalty: z.number().min(-2).max(2).default(0),
   reasoningEffort: z.enum(["low", "medium", "high", "maximum"]).nullable().default(null),
   verbosity: z.enum(["low", "medium", "high"]).nullable().default(null),
+  assistantPrefill: z.string().default(""),
+  customParameters: z.record(z.unknown()).default({}),
   squashSystemMessages: z.boolean().default(true),
   showThoughts: z.boolean().default(true),
   useMaxContext: z.boolean().default(false),

@@ -31,8 +31,14 @@ export function useConnection(id: string | null) {
 export function useCreateConnection() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { name: string; provider: string; apiKey: string; baseUrl?: string; model?: string }) =>
-      api.post("/connections", data),
+    mutationFn: (data: {
+      name: string;
+      provider: string;
+      apiKey: string;
+      baseUrl?: string;
+      model?: string;
+      maxContext?: number;
+    }) => api.post("/connections", data),
     onSuccess: () => qc.invalidateQueries({ queryKey: connectionKeys.list() }),
   });
 }

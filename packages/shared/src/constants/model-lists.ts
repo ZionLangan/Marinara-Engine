@@ -278,6 +278,17 @@ export const COHERE_MODELS: KnownModel[] = [
 
 export const OPENROUTER_MODELS: KnownModel[] = [];
 
+// ── xAI / Grok (OpenAI-compatible API) ──
+
+export const XAI_MODELS: KnownModel[] = [
+  // Official xAI docs recommend Grok 4.3 for standard chat API usage.
+  { id: "grok-4.3", name: "Grok 4.3", context: 1000000, maxOutput: 0 },
+  // Reasoning docs mention this model as auto-reasoning without configurable effort.
+  { id: "grok-4-1-fast", name: "Grok 4.1 Fast", context: 2000000, maxOutput: 0 },
+  // Multi-agent research model; uses Responses API and reasoning.effort for 4 vs 16 agents.
+  { id: "grok-4.20-multi-agent", name: "Grok 4.20 Multi-Agent", context: 2000000, maxOutput: 0 },
+];
+
 // ── Additional providers with static lists in SillyTavern ──
 
 // Groq (from #model_groq_select)
@@ -475,9 +486,15 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   { id: "dall-e-2", name: "DALL-E 2", context: 0, maxOutput: 0 },
   { id: "gpt-image-1", name: "GPT Image 1", context: 0, maxOutput: 0 },
   // Stability AI
-  { id: "sd3-large", name: "Stable Diffusion 3 Large", context: 0, maxOutput: 0 },
-  { id: "sd3-large-turbo", name: "SD3 Large Turbo", context: 0, maxOutput: 0 },
-  { id: "sd3-medium", name: "Stable Diffusion 3 Medium", context: 0, maxOutput: 0 },
+  { id: "stable-image-core", name: "Stable Image Core", context: 0, maxOutput: 0 },
+  { id: "stable-image-ultra", name: "Stable Image Ultra", context: 0, maxOutput: 0 },
+  { id: "sd3.5-large", name: "Stable Diffusion 3.5 Large", context: 0, maxOutput: 0 },
+  { id: "sd3.5-large-turbo", name: "SD3.5 Large Turbo", context: 0, maxOutput: 0 },
+  { id: "sd3.5-medium", name: "Stable Diffusion 3.5 Medium", context: 0, maxOutput: 0 },
+  { id: "sd3.5-flash", name: "Stable Diffusion 3.5 Flash", context: 0, maxOutput: 0 },
+  { id: "sd3-large", name: "Stable Diffusion 3 Large (legacy alias)", context: 0, maxOutput: 0 },
+  { id: "sd3-large-turbo", name: "SD3 Large Turbo (legacy alias)", context: 0, maxOutput: 0 },
+  { id: "sd3-medium", name: "Stable Diffusion 3 Medium (legacy alias)", context: 0, maxOutput: 0 },
   // Together AI
   { id: "black-forest-labs/FLUX.1-schnell-Free", name: "FLUX.1 Schnell (Free)", context: 0, maxOutput: 0 },
   { id: "black-forest-labs/FLUX.1-schnell", name: "FLUX.1 Schnell", context: 0, maxOutput: 0 },
@@ -541,6 +558,7 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   cohere: COHERE_MODELS,
   openrouter: OPENROUTER_MODELS,
   nanogpt: [], // NanoGPT aggregator — models fetched dynamically via API
+  xai: XAI_MODELS,
   // Seed OAI-compatible endpoints with the OpenAI catalog; remote /models still merge on top.
   custom: OPENAI_MODELS,
   image_generation: IMAGE_GEN_MODELS,

@@ -10,7 +10,5 @@
     "noUnusedParameters": false
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../shared" }
-  ]
+  "references": [{ "path": "../shared" }]
 }

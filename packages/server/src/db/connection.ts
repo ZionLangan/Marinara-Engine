@@ -3,17 +3,24 @@
 // ──────────────────────────────────────────────
 import { logger } from "../lib/logger.js";
 import * as schema from "./schema/index.js";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { getDatabaseDriver, getDatabaseFilePath } from "../config/runtime-config.js";
+import {
+  getDatabaseDriver,
+  getDatabaseFilePath,
+  getLegacyDatabaseImportPaths,
+  isFileStorageBackend,
+} from "../config/runtime-config.js";
+import { createFileNativeDB, type FileNativeStoreController } from "./file-backed-store.js";
 
-type DrizzleDB = ReturnType<typeof import("drizzle-orm/libsql").drizzle<typeof schema>>;
 type DbCleanup = () => void | Promise<void>;
+type DrizzleDB = ReturnType<typeof import("drizzle-orm/libsql").drizzle<typeof schema>>;
 
-let dbPromise: Promise<DrizzleDB> | null = null;
+let dbPromise: Promise<DB> | null = null;
 let dbCleanup: DbCleanup | null = null;
+let fileStore: FileNativeStoreController | null = null;
 
-async function createWithLibsql(dbPath: string): Promise<DrizzleDB> {
+async function createWithLibsql(dbPath: string): Promise<DB> {
   const { createClient } = await import("@libsql/client");
   const { drizzle } = await import("drizzle-orm/libsql");
 
@@ -29,114 +36,50 @@ async function createWithLibsql(dbPath: string): Promise<DrizzleDB> {
   }
 
   dbCleanup = () => client.close();
-  return drizzle(client, { schema });
+  return drizzle(client, { schema }) as unknown as DB;
 }
 
-async function createWithBetterSqlite3(dbPath: string): Promise<DrizzleDB> {
-  const Database = (await import("better-sqlite3")).default;
-  const { drizzle } = await import("drizzle-orm/better-sqlite3");
-
-  const sqlite = new Database(dbPath);
-  try {
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("synchronous = NORMAL");
-    sqlite.pragma("busy_timeout = 5000");
-    sqlite.pragma("foreign_keys = ON");
-  } catch (err) {
-    sqlite.close();
-    throw err;
-  }
-
-  dbCleanup = () => sqlite.close();
-
-  // Cast is safe — both Drizzle SQLite drivers share the same query API
-  return drizzle(sqlite, { schema }) as unknown as DrizzleDB;
-}
-
-async function createWithSqlJs(dbPath: string): Promise<DrizzleDB> {
-  const initSqlJs = (await import("sql.js")).default;
-  const { drizzle } = await import("drizzle-orm/sql-js");
-
-  const SQL = await initSqlJs();
-
-  // Load existing database from disk if it exists
-  let sqlDb;
-  if (existsSync(dbPath)) {
-    const fileBuffer = readFileSync(dbPath);
-    sqlDb = new SQL.Database(fileBuffer);
-  } else {
-    sqlDb = new SQL.Database();
-  }
-
-  sqlDb.run("PRAGMA journal_mode = WAL");
-  sqlDb.run("PRAGMA synchronous = NORMAL");
-  sqlDb.run("PRAGMA busy_timeout = 5000");
-  sqlDb.run("PRAGMA foreign_keys = ON");
-
-  // Persist to disk periodically and on process exit
-  const save = () => {
-    try {
-      const data = sqlDb.export();
-      const buffer = Buffer.from(data);
-      writeFileSync(dbPath, buffer);
-    } catch (err) {
-      // Non-fatal — log but don't crash
-      logger.error(err, "[sql.js] Failed to persist database to disk");
-    }
-  };
-
-  // Auto-save every 30 seconds
-  const timer = setInterval(save, 30_000);
-  timer.unref(); // Don't prevent process exit
-
-  // Save on natural process exit and Fastify shutdown.
-  const beforeExitHandler = () => save();
-  process.on("beforeExit", beforeExitHandler);
-
-  dbCleanup = () => {
-    clearInterval(timer);
-    process.off("beforeExit", beforeExitHandler);
-    save();
-    sqlDb.close();
-  };
-
-  return drizzle(sqlDb, { schema }) as unknown as DrizzleDB;
-}
-
-async function createDB(dbPath: string): Promise<DrizzleDB> {
+async function createDB(dbPath: string): Promise<DB> {
   mkdirSync(dirname(dbPath), { recursive: true });
 
   const driver = getDatabaseDriver();
-
-  // Explicit driver selection
-  if (driver === "better-sqlite3") {
-    return createWithBetterSqlite3(dbPath);
-  }
-  if (driver === "sql.js") {
-    return createWithSqlJs(dbPath);
+  if (driver && driver !== "libsql") {
+    throw new Error(
+      `DATABASE_DRIVER=${driver} is no longer bundled. Marinara v1.5.7 uses file storage by default; ` +
+        `legacy STORAGE_BACKEND=sqlite only supports DATABASE_DRIVER=libsql.`,
+    );
   }
 
-  // Default: try libsql → better-sqlite3 → sql.js
-  try {
-    return await createWithLibsql(dbPath);
-  } catch {
-    try {
-      return await createWithBetterSqlite3(dbPath);
-    } catch {
-      return await createWithSqlJs(dbPath);
-    }
-  }
+  return createWithLibsql(dbPath);
+}
+
+async function createWithFileStorage(dbPaths: string[]): Promise<DB> {
+  const db = await createFileNativeDB(dbPaths);
+  fileStore = db._fileStore;
+  dbCleanup = async () => {
+    await fileStore?.close();
+    fileStore = null;
+  };
+  return db as unknown as DB;
 }
 
 export async function getDB() {
   if (!dbPromise) {
     const dbPath = getDatabaseFilePath();
+    if (isFileStorageBackend()) {
+      dbPromise = createWithFileStorage(getLegacyDatabaseImportPaths());
+      return dbPromise;
+    }
     if (!dbPath) {
-      throw new Error("DATABASE_URL must resolve to a file-backed SQLite database");
+      throw new Error("DATABASE_URL must resolve to a legacy SQLite file when STORAGE_BACKEND=sqlite");
     }
     dbPromise = createDB(dbPath);
   }
   return dbPromise;
+}
+
+export async function flushDB() {
+  await fileStore?.flush();
 }
 
 export async function closeDB() {

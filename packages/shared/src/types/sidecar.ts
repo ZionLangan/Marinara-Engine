@@ -7,6 +7,7 @@
 // ──────────────────────────────────────────────
 
 import type { DirectionCommand } from "./game.js";
+import type { LocationKind, MusicGenre, MusicIntensity } from "../utils/music-score.js";
 
 /** Available quantization variants for the sidecar model. */
 export type SidecarQuantization = "q8_0" | "q4_k_m";
@@ -166,14 +167,20 @@ export interface GeneratedSceneIllustration {
 export interface SceneAnalysis {
   /** Background tag from the asset manifest to display. */
   background: string | null;
-  /** Music tag to play. */
+  /** Music tag to play, populated by deterministic scoring after analysis. */
   music: string | null;
-  /** Ambient loop tag. */
+  /** Ambient loop tag, populated by deterministic scoring after analysis. */
   ambient: string | null;
   /** Weather description update — applied immediately. */
   weather: string | null;
   /** Time of day update — applied immediately. */
   timeOfDay: string | null;
+  /** Compact scene-genre hint for deterministic music scoring. */
+  musicGenre?: MusicGenre | null;
+  /** Compact scene-intensity hint for deterministic music scoring. */
+  musicIntensity?: MusicIntensity | null;
+  /** Compact physical-location hint for deterministic ambient scoring. */
+  locationKind?: LocationKind | null;
   /** NPC reputation changes — applied immediately. */
   reputationChanges: SceneReputationChange[];
   /** Segment-indexed effects. Each entry fires when the user reaches that segment. */

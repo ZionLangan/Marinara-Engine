@@ -57,6 +57,16 @@ export function createRegexScriptsStorage(db: DB) {
       return this.getById(id);
     },
 
+    async reorder(scriptIds: string[]) {
+      const timestamp = now();
+      await Promise.all(
+        scriptIds.map((id, index) =>
+          db.update(regexScripts).set({ order: index, updatedAt: timestamp }).where(eq(regexScripts.id, id)),
+        ),
+      );
+      return this.list();
+    },
+
     async remove(id: string) {
       await db.delete(regexScripts).where(eq(regexScripts.id, id));
     },

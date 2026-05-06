@@ -50,6 +50,18 @@ function setCharacterCardFieldValue(
   };
 }
 
+function bumpCharacterVersion(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "1.1";
+  const match = raw.match(/^(.*?)(\d+)(\D*)$/);
+  if (!match) return `${raw}.1`;
+  const prefix = match[1] ?? "";
+  const numberPart = match[2] ?? "0";
+  const suffix = match[3] ?? "";
+  const next = String(Number(numberPart) + 1).padStart(numberPart.length, "0");
+  return `${prefix}${next}${suffix}`;
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -116,10 +128,13 @@ export function CharacterCardUpdateModal({ open, onClose }: Props) {
       if (typeof base !== "string") continue;
       nextData = setCharacterCardFieldValue(nextData, u.field, base.replace(u.oldText, u.newText));
     }
+    nextData.character_version = bumpCharacterVersion(nextData.character_version);
     try {
       await updateCharacter.mutateAsync({
         id: entry.characterId,
         data: nextData,
+        versionSource: "agent",
+        versionReason: `${entry.agentName} card update`,
       });
       closeAndAdvance();
     } catch (err) {

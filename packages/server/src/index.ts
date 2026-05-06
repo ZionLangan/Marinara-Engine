@@ -1,9 +1,22 @@
 // ──────────────────────────────────────────────
 // Server Entry Point
 // ──────────────────────────────────────────────
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { buildApp } from "./app.js";
 import { logger } from "./lib/logger.js";
 import { getHost, getPort, getServerProtocol, loadTlsOptions, logStorageDiagnostics } from "./config/runtime-config.js";
+import { migrateTaskbarShortcuts } from "./services/setup/taskbar-shortcut-migration.js";
+
+function scheduleTaskbarShortcutMigration() {
+  const timeout = setTimeout(() => {
+    const installDir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    void migrateTaskbarShortcuts(installDir).catch((err) => {
+      logger.warn({ err }, "taskbar shortcut migration skipped");
+    });
+  }, 1_000);
+  timeout.unref?.();
+}
 
 async function main() {
   const tls = loadTlsOptions();
@@ -43,6 +56,7 @@ async function main() {
   try {
     await app.listen({ port, host });
     logger.info(`Marinara Engine server listening on ${protocol}://${host}:${port}`);
+    scheduleTaskbarShortcutMigration();
   } catch (err) {
     if (isShuttingDown) {
       logger.info("Startup interrupted by shutdown");

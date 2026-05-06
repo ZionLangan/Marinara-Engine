@@ -14,6 +14,8 @@ const DEFAULT_PARAMS = {
   topP: 0.95,
   frequencyPenalty: 0,
   presencePenalty: 0,
+  assistantPrefill: "",
+  customParameters: {},
 };
 
 interface Props {

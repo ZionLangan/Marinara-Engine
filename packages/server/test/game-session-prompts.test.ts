@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { SessionSummary } from "@marinara-engine/shared";
+import type { GameNpc, SessionSummary } from "@marinara-engine/shared";
 import {
   buildGmFormatReminder,
   buildGmSystemPrompt,
@@ -89,6 +89,44 @@ test("GM prompt includes every prior session summary but only the latest session
   assert.doesNotMatch(prompt, /session-one-stats/);
 });
 
+test("GM prompt tolerates legacy partial session summaries and NPC records", () => {
+  const prompt = buildGmSystemPrompt({
+    gameActiveState: "exploration",
+    storyArc: null,
+    plotTwists: ["A sealed door opens soon."],
+    map: null,
+    npcs: [
+      {
+        name: "Archivist Ilya",
+        location: "Library",
+        reputation: 12,
+        met: true,
+      },
+    ] as unknown as GameNpc[],
+    sessionSummaries: [
+      {
+        summary: "The party escaped the archive.",
+        resumePoint: "Resume outside the locked archive.",
+        revelations: ["The key was copied."],
+      },
+    ] as unknown as SessionSummary[],
+    sessionNumber: 2,
+    partyNames: ["Aster"],
+    playerName: "Mari",
+    playerCard: null,
+    gmCharacterCard: null,
+    difficulty: "normal",
+    genre: "fantasy",
+    setting: "original",
+    tone: "balanced",
+  });
+
+  assert.match(prompt, /Session 1 summary:\nThe party escaped the archive\./);
+  assert.match(prompt, /Resume point: Resume outside the locked archive\./);
+  assert.match(prompt, /Key discoveries: The key was copied\./);
+  assert.match(prompt, /Archivist Ilya @ Library/);
+});
+
 test("session summary prompt requires a resume point and cross-field dedupe", () => {
   const prompt = buildSessionSummaryPrompt("Polish");
 
@@ -145,16 +183,11 @@ test("GM format reminder reinforces native-language output quality near generati
     language: "Polski",
   });
 
-  assert.match(prompt, /Write every player-visible line in native Polish\./);
-  assert.match(prompt, /The English examples below are format-only; do not imitate their wording or syntax\./);
-  assert.match(
-    prompt,
-    /Before finalizing, silently copy-edit for grammar, word order, punctuation, orthography, and language-specific agreement, removing calques, mixed-language scaffolding, and untranslated filler\./,
-  );
-  assert.match(
-    prompt,
-    /Only tags, commands, field names, and deliberate proper nouns or code terms may remain in English\./,
-  );
+  assert.match(prompt, /Write directly in Polish as a native speaker would\./);
+  assert.match(prompt, /The English examples below illustrate structure and format only\./);
+  assert.match(prompt, /Do not mirror their syntax, sentence length, or phrasing\./);
+  assert.match(prompt, /Your output must be natural and grammatical in Polish/);
+  assert.match(prompt, /Only tags, commands, field names, and intentional proper nouns stay in English\./);
   assert.doesNotMatch(prompt, /native Polski/);
 });
 
@@ -191,7 +224,8 @@ test("GM format reminder documents the simplified resolved skill_check command",
     /\[skill_check: skill="Skill Name" dc="1-20" rolls="1-20" modifier="0-10" total="roll \+ modifier \| 1 \| 20" result="critical_success \| success \| failure \| critical_failure"\]/,
   );
   assert.match(prompt, /when uncertainty or the player's actions should be resolved mechanically\./);
-  assert.match(prompt, /You choose the roll result fairly, then narrate the consequence in the same turn\./);
+  assert.match(prompt, /Abandon positivity bias/);
+  assert.match(prompt, /roll honestly, and narrate the consequence in the same turn\./);
   assert.doesNotMatch(prompt, /Legacy fallback:/);
   assert.doesNotMatch(prompt, /\bused=/);
   assert.doesNotMatch(prompt, /\bmode=/);

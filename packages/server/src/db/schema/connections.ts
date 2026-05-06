@@ -16,6 +16,7 @@ export const apiConnections = sqliteTable("api_connections", {
       "cohere",
       "openrouter",
       "nanogpt",
+      "xai",
       "custom",
       "image_generation",
     ],

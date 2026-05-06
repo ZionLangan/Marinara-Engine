@@ -43,3 +43,22 @@ test("context fitting reduces completion budget before truncating protected prom
   assert.ok((fit.maxTokens ?? 0) < 500);
   assert.ok((fit.estimatedTokensAfter ?? 0) <= (fit.inputBudget ?? 0));
 });
+
+test("context fitting preserves agent context by reducing oversized local output budget first", () => {
+  const prompt = repeated("agent prompt", 1000);
+  const messages: ChatMessage[] = [
+    { role: "system", content: prompt },
+    { role: "user", content: repeated("agent history user", 4000), contextKind: "history" },
+    { role: "assistant", content: repeated("agent history assistant", 4000), contextKind: "history" },
+    { role: "user", content: repeated("current turn", 2000), contextKind: "history" },
+  ];
+
+  const fit = fitMessagesToContext(messages, { maxContext: 8192, maxTokens: 8192 });
+
+  assert.equal(fit.trimmed, false);
+  assert.equal(fit.messages.length, messages.length);
+  assert.equal(fit.estimatedTokensAfter, fit.estimatedTokensBefore);
+  assert.ok((fit.inputBudget ?? 0) > 128);
+  assert.ok((fit.maxTokens ?? 0) < 8192);
+  assert.ok((fit.estimatedTokensAfter ?? 0) <= (fit.inputBudget ?? 0));
+});

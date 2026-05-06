@@ -120,7 +120,7 @@ Transition guide:
 - none: instant swap (neutral reset, very minor change).
 Instructions:
 1. ONLY include characters listed in <available_sprites>. If a character is not listed there, do NOT include them.
-2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123".
+2. The characterId MUST be the exact ID string from the parentheses, e.g. if the entry says "Dottore (abc123): happy, sad" then characterId must be "abc123". Never invent, reuse, or copy a different ID from chat history.
 3. When a character's emotion is ambiguous, pick the closest available expression name rather than guessing a generic one.`,
 
   /* ────────────────────────────────────────── */
@@ -238,7 +238,7 @@ Prompt quality rules:
 5. If nothing noteworthy was established this turn, return: { "updates": [] }
 6. DEDUPLICATION, CRITICAL: Check the <existing_entries> list of existing lorebook entries before creating anything. If an entry with the same or a very similar name already exists, use "update" instead of "create". NEVER create a second entry for a subject that's already covered. Prefer updating and enriching an existing entry over making a new one.
 7. LOCKED ENTRIES: Entries marked as locked CANNOT be modified. Do not emit updates targeting locked entry names. Respect the user's protection.
-8. When updating an existing entry, MERGE new information with the existing content. Do NOT replace or erase existing details. Add the new facts while keeping everything that was already there.
+8. When updating an existing entry, do NOT rewrite the full entry. Return only the durable additions in "newFacts"; the app will append them to the existing content without erasing old details. Use "content" for creates, or only for an update when the existing entry is empty or malformed.
 9. CHAT SUMMARY AWARENESS: If a <chat_summary> block is provided, it contains information already captured by the summary system. Do NOT create lorebook entries for facts that are only restated from the summary and not newly established in the latest messages. Only record genuinely new lore not already covered by the summary.
 Output format:
 {
@@ -246,7 +246,8 @@ Output format:
     {
       "action": "create|update",
       "entryName": "string — name of the entry (must match existing name exactly when updating)",
-      "content": "string — the lore content to store (when updating: include ALL existing info plus new details)",
+      "content": "string — full lore content for creates; for updates, only use this if replacing an empty or malformed entry is truly necessary",
+      "newFacts": ["string — for updates only: atomic new facts to append to the existing entry without rewriting it"],
       "keys": ["string — activation keywords for this entry"],
       "tag": "string — category tag (character, location, item, faction, event, lore)",
       "reason": "string — why this should be recorded."
@@ -410,18 +411,18 @@ Schema:
 }
 1. Stats range from 0 to 100 (percentage-based). Never set any stat below 0 or above 100.
 2. Changes must be proportional to what actually happened. Don't swing wildly over minor events.
-  2a. Small routine actions = small changes (1–5%):
+  2a. Small routine actions = small changes (1–10%):
     Walking around → Energy -1 to -3%, Hygiene -1 to -2%
     Eating a snack → Satiety +5 to +10%
     Brief rest → Energy +3 to +5%
-  2b. Moderate events = moderate changes (5–15%):
+  2b. Moderate events = moderate changes (10–50%):
     A full meal → Satiety +20 to +40%
     A short nap → Energy +10 to +20%
     Getting splashed with water → Hygiene -10 to -15%
-  2c. Major events = large changes (15–40%):
-    Falling into mud → Hygiene -20 to -40%
-    Full night's sleep → Energy +40 to +60%
-    Taking a bath/shower → Hygiene → 95–100%
+  2c. Major events = large changes (50–100%):
+    Falling into mud → Hygiene -50%
+    Full night's sleep → Energy → 95–100%
+    Taking a bath/shower → Hygiene → 95–100%s
 3. Time passage naturally decays stats: Energy, Satiety, and Hygiene decrease slowly over time, even without events.
 4. Preserve previous values and only adjust what the narrative warrants. If nothing relevant happened, return the previous values unchanged.
 5. Track the player persona's current status — a short phrase summarising what they are doing or their condition.

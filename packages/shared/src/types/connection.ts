@@ -12,6 +12,7 @@ export type APIProvider =
   | "cohere"
   | "openrouter"
   | "nanogpt"
+  | "xai"
   | "custom"
   | "image_generation";
 

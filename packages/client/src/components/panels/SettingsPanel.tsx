@@ -4,13 +4,14 @@
 import {
   APP_LANGUAGE_OPTIONS,
   useUIStore,
+  type GameDialogueDisplayMode,
   type InstalledExtension,
   type RoleplayAvatarStyle,
   type VisualTheme,
 } from "../../stores/ui.store";
 import { cn, generateClientId } from "../../lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../lib/api-client";
+import { ADMIN_SECRET_STORAGE_KEY, api, getAdminSecretHeader } from "../../lib/api-client";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { toast } from "sonner";
@@ -49,6 +50,7 @@ import {
   FolderOpen,
   RefreshCw,
   ExternalLink,
+  ScrollText,
 } from "lucide-react";
 import { useClearAllData, useExpungeData, useUpdateChatMetadata, type ExpungeScope } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
@@ -57,6 +59,8 @@ import { chatKeys } from "../../hooks/use-chats";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { ConversationSoundSetting, ToggleSetting } from "./settings/SettingControls";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
+import { inspectCharacterFilesForEmbeddedLorebooks } from "../../lib/character-import";
 
 const TABS = [
   { id: "general", label: "General" },
@@ -103,6 +107,23 @@ const EXPUNGE_SCOPE_OPTIONS: Array<{ id: ExpungeScope; label: string; descriptio
   },
 ];
 
+async function readSettingsResponseError(res: Response, fallback: string) {
+  const contentType = res.headers.get("content-type") ?? "";
+
+  try {
+    if (contentType.includes("application/json")) {
+      const payload = (await res.json()) as { error?: unknown; message?: unknown };
+      const message = typeof payload.message === "string" ? payload.message : payload.error;
+      return typeof message === "string" && message.trim() ? message : fallback;
+    }
+
+    const text = (await res.text()).trim();
+    return text ? text.slice(0, 500) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: string; desc: string }> = [
   {
     id: "circles",
@@ -121,11 +142,24 @@ const ROLEPLAY_AVATAR_STYLE_OPTIONS: Array<{ id: RoleplayAvatarStyle; label: str
   },
 ];
 
+const GAME_DIALOGUE_DISPLAY_OPTIONS: Array<{ id: GameDialogueDisplayMode; label: string; desc: string }> = [
+  {
+    id: "classic",
+    label: "Classic VN",
+    desc: "One active segment in the VN box, with logs available from the Logs button.",
+  },
+  {
+    id: "stacked",
+    label: "History Above VN",
+    desc: "Shows prior segments above the VN box and keeps the full session scrollable there.",
+  },
+];
+
 const GAME_ASSET_CATEGORIES = [
   {
     id: "music",
     label: "Music",
-    defaultFolder: "exploration",
+    defaultFolder: "exploration/fantasy/calm",
     accept: "audio/*,.mp3,.ogg,.wav,.flac,.m4a,.aac,.webm",
   },
   {
@@ -159,6 +193,49 @@ const GAME_ASSET_CATEGORY_BY_ID = new Map(GAME_ASSET_CATEGORIES.map((category) =
 
 // Module-level set survives component remounts (e.g. mobile AnimatePresence unmount/remount)
 const mountedSettingsTabs = new Set<string>();
+
+function ImageDimensionRow({
+  label,
+  help,
+  width,
+  height,
+  onCommit,
+}: {
+  label: string;
+  help: string;
+  width: number;
+  height: number;
+  onCommit: (width: number, height: number) => void;
+}) {
+  return (
+    <div className="grid gap-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="min-w-0">
+        <div className="inline-flex items-center gap-1 text-xs font-medium text-[var(--foreground)]">
+          {label}
+          <HelpTooltip text={help} />
+        </div>
+        <div className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">Pixels, clamped from 64 to 4096.</div>
+      </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1.5 sm:w-40">
+        <DraftNumberInput
+          value={width}
+          min={64}
+          max={4096}
+          onCommit={(nextWidth) => onCommit(nextWidth, height)}
+          className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+        />
+        <span className="text-[0.625rem] text-[var(--muted-foreground)]">x</span>
+        <DraftNumberInput
+          value={height}
+          min={64}
+          max={4096}
+          onCommit={(nextHeight) => onCommit(width, nextHeight)}
+          className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs"
+        />
+      </div>
+    </div>
+  );
+}
 
 export function SettingsPanel() {
   const settingsTab = useUIStore((s) => s.settingsTab);
@@ -222,6 +299,17 @@ function GeneralSettings() {
   const setGameTextSpeed = useUIStore((s) => s.setGameTextSpeed);
   const gameAutoPlayDelay = useUIStore((s) => s.gameAutoPlayDelay);
   const setGameAutoPlayDelay = useUIStore((s) => s.setGameAutoPlayDelay);
+  const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
+  const setReviewImagePromptsBeforeSend = useUIStore((s) => s.setReviewImagePromptsBeforeSend);
+  const imageBackgroundWidth = useUIStore((s) => s.imageBackgroundWidth);
+  const imageBackgroundHeight = useUIStore((s) => s.imageBackgroundHeight);
+  const setImageBackgroundDimensions = useUIStore((s) => s.setImageBackgroundDimensions);
+  const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
+  const imagePortraitHeight = useUIStore((s) => s.imagePortraitHeight);
+  const setImagePortraitDimensions = useUIStore((s) => s.setImagePortraitDimensions);
+  const imageSelfieWidth = useUIStore((s) => s.imageSelfieWidth);
+  const imageSelfieHeight = useUIStore((s) => s.imageSelfieHeight);
+  const setImageSelfieDimensions = useUIStore((s) => s.setImageSelfieDimensions);
   const enterToSendRP = useUIStore((s) => s.enterToSendRP);
   const setEnterToSendRP = useUIStore((s) => s.setEnterToSendRP);
   const enterToSendConvo = useUIStore((s) => s.enterToSendConvo);
@@ -234,6 +322,14 @@ function GeneralSettings() {
   const setMessagesPerPage = useUIStore((s) => s.setMessagesPerPage);
   const boldDialogue = useUIStore((s) => s.boldDialogue);
   const setBoldDialogue = useUIStore((s) => s.setBoldDialogue);
+  const trimIncompleteModelOutput = useUIStore((s) => s.trimIncompleteModelOutput);
+  const setTrimIncompleteModelOutput = useUIStore((s) => s.setTrimIncompleteModelOutput);
+  const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
+  const setSpeechToTextEnabled = useUIStore((s) => s.setSpeechToTextEnabled);
+  const intuitiveSwipeNavigation = useUIStore((s) => s.intuitiveSwipeNavigation);
+  const setIntuitiveSwipeNavigation = useUIStore((s) => s.setIntuitiveSwipeNavigation);
+  const intuitiveSwipeRerollLatest = useUIStore((s) => s.intuitiveSwipeRerollLatest);
+  const setIntuitiveSwipeRerollLatest = useUIStore((s) => s.setIntuitiveSwipeRerollLatest);
   const rescanGameAssets = useGameAssetStore((s) => s.rescanAssets);
   const assetFileRef = useRef<HTMLInputElement>(null);
   const [assetCategory, setAssetCategory] = useState<GameAssetCategoryId>("backgrounds");
@@ -495,6 +591,76 @@ function GeneralSettings() {
         }
       />
 
+      <ToggleSetting
+        label="Trim incomplete model endings"
+        checked={trimIncompleteModelOutput}
+        onChange={setTrimIncompleteModelOutput}
+        help="When on, Marinara trims a trailing unfinished sentence from AI responses before saving the message. It leaves complete responses and command-only endings alone."
+      />
+
+      <ToggleSetting
+        label="Speech-to-text microphone"
+        checked={speechToTextEnabled}
+        onChange={setSpeechToTextEnabled}
+        help="When on, chat input bars show a microphone button for browser dictation. Handy still works independently by pasting into the focused input field."
+      />
+
+      <ToggleSetting
+        label="Intuitive swipe navigation"
+        checked={intuitiveSwipeNavigation}
+        onChange={setIntuitiveSwipeNavigation}
+        help="In Conversation and Roleplay modes, use Left/Right Arrow on desktop or horizontal touch swipes on mobile to move between alternate generations on the latest assistant message."
+      />
+
+      <div className={cn("pl-5 transition-opacity", intuitiveSwipeNavigation ? "" : "pointer-events-none opacity-45")}>
+        <ToggleSetting
+          label="Reroll past the newest swipe"
+          checked={intuitiveSwipeRerollLatest}
+          onChange={setIntuitiveSwipeRerollLatest}
+          help="When intuitive swipes are enabled, pressing Right Arrow or swiping left on the newest swipe of the latest assistant message creates a new reroll."
+        />
+      </div>
+
+      <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
+        <div className="mb-3 flex flex-col gap-1">
+          <div className="text-xs font-semibold text-[var(--foreground)]">Image Generation</div>
+          <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            Review generated prompts before Game mode sends them, and set default canvases for generated assets.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2.5">
+          <ToggleSetting
+            label="Expose image prompts before sending"
+            checked={reviewImagePromptsBeforeSend}
+            onChange={setReviewImagePromptsBeforeSend}
+            help="When Game mode needs generated backgrounds, illustrations, or NPC portraits, it shows one grouped prompt review window before sending requests to the image provider."
+          />
+
+          <ImageDimensionRow
+            label="Backgrounds"
+            help="Used for Game mode generated backgrounds and special scene illustrations."
+            width={imageBackgroundWidth}
+            height={imageBackgroundHeight}
+            onCommit={setImageBackgroundDimensions}
+          />
+          <ImageDimensionRow
+            label="Portraits"
+            help="Used for generated character and NPC portraits."
+            width={imagePortraitWidth}
+            height={imagePortraitHeight}
+            onCommit={setImagePortraitDimensions}
+          />
+          <ImageDimensionRow
+            label="Selfies"
+            help="Default selfie canvas for Roleplay and Conversation image commands when a chat does not override selfie resolution."
+            width={imageSelfieWidth}
+            height={imageSelfieHeight}
+            onCommit={setImageSelfieDimensions}
+          />
+        </div>
+      </div>
+
       {/* Game Assets Folders */}
       <div className="rounded-xl bg-[var(--secondary)]/50 p-4 ring-1 ring-[var(--border)]">
         <div className="mb-2 flex items-center justify-between gap-2">
@@ -589,7 +755,8 @@ function GeneralSettings() {
         <p className="mt-2.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           On desktop, folder buttons open the server's asset folders. On mobile or a dedicated server, use upload here
           so files from your phone are copied onto the server. Audio supports MP3, OGG, WAV, FLAC, M4A, AAC, and WebM;
-          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites.
+          images support PNG, JPG, GIF, WebP, AVIF, and SVG for sprites. Music folders use state/genre/intensity, such
+          as exploration/fantasy/calm.
         </p>
       </div>
     </div>
@@ -621,12 +788,19 @@ function AppearanceSettings() {
   );
   const fontFamily = useUIStore((s) => s.fontFamily);
   const setFontFamily = useUIStore((s) => s.setFontFamily);
-  const convoGradientFrom = useUIStore((s) => s.convoGradientFrom);
-  const setConvoGradientFrom = useUIStore((s) => s.setConvoGradientFrom);
-  const convoGradientTo = useUIStore((s) => s.convoGradientTo);
-  const setConvoGradientTo = useUIStore((s) => s.setConvoGradientTo);
-  const [draftFrom, setDraftFrom] = useState(convoGradientFrom);
-  const [draftTo, setDraftTo] = useState(convoGradientTo);
+  const convoGradient = useUIStore((s) => s.convoGradient);
+  const setConvoGradientField = useUIStore((s) => s.setConvoGradientField);
+  const [activeGradientScheme, setActiveGradientScheme] = useState<"dark" | "light">(theme);
+  const currentGradient = convoGradient[activeGradientScheme];
+  const [draftFrom, setDraftFrom] = useState(currentGradient.from);
+  const [draftTo, setDraftTo] = useState(currentGradient.to);
+
+  // Sync draft inputs when switching between scheme tabs so the text fields
+  // always reflect the stored value for the active scheme.
+  useEffect(() => {
+    setDraftFrom(currentGradient.from);
+    setDraftTo(currentGradient.to);
+  }, [activeGradientScheme, currentGradient.from, currentGradient.to]);
   const fontSize = useUIStore((s) => s.fontSize);
   const setFontSize = useUIStore((s) => s.setFontSize);
   const chatFontSize = useUIStore((s) => s.chatFontSize);
@@ -641,6 +815,8 @@ function AppearanceSettings() {
   const setChatFontOpacity = useUIStore((s) => s.setChatFontOpacity);
   const roleplayAvatarStyle = useUIStore((s) => s.roleplayAvatarStyle);
   const setRoleplayAvatarStyle = useUIStore((s) => s.setRoleplayAvatarStyle);
+  const gameDialogueDisplayMode = useUIStore((s) => s.gameDialogueDisplayMode);
+  const setGameDialogueDisplayMode = useUIStore((s) => s.setGameDialogueDisplayMode);
   const gameAvatarScale = useUIStore((s) => s.gameAvatarScale);
   const setGameAvatarScale = useUIStore((s) => s.setGameAvatarScale);
   const textStrokeWidth = useUIStore((s) => s.textStrokeWidth);
@@ -1054,6 +1230,32 @@ function AppearanceSettings() {
         </div>
       </div>
 
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          <ScrollText size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Game Dialogue Display</span>
+          <HelpTooltip text="Choose whether Game mode uses the classic VN box or shows a scrollable segment history directly above it." />
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {GAME_DIALOGUE_DISPLAY_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setGameDialogueDisplayMode(opt.id)}
+              className={cn(
+                "flex flex-col items-start gap-1 rounded-lg border p-3 text-left text-xs transition-all",
+                gameDialogueDisplayMode === opt.id
+                  ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]"
+                  : "border-[var(--border)] hover:border-[var(--primary)]/40",
+              )}
+            >
+              <span className="font-semibold">{opt.label}</span>
+              <span className="text-[0.625rem] leading-tight text-[var(--muted-foreground)]">{opt.desc}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ── Effects ── */}
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-1.5">
@@ -1073,26 +1275,55 @@ function AppearanceSettings() {
         </p>
       </div>
 
-      {/* ── Conversation Gradient ── */}
+      {/* ── Conversation Gradient (per color-scheme) ── */}
       <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-1.5">
-          <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
-          <span className="text-xs font-medium">Conversation Theme</span>
-          <HelpTooltip text="Set a background gradient for all Conversation-mode chats, similar to Discord." />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Palette size="0.75rem" className="text-[var(--muted-foreground)]" />
+            <span className="text-xs font-medium">Conversation Theme</span>
+            <HelpTooltip text="Set a background gradient for all Conversation-mode chats, separately for dark and light color schemes." />
+          </div>
+          {/* Scheme tabs */}
+          <div className="flex rounded-lg bg-[var(--secondary)] p-0.5 text-[0.625rem]">
+            <button
+              type="button"
+              onClick={() => setActiveGradientScheme("dark")}
+              className={cn(
+                "rounded-md px-2 py-1 transition-colors",
+                activeGradientScheme === "dark"
+                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              )}
+            >
+              Dark
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveGradientScheme("light")}
+              className={cn(
+                "rounded-md px-2 py-1 transition-colors",
+                activeGradientScheme === "light"
+                  ? "bg-[var(--primary)] text-[var(--primary-foreground)] shadow-sm"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              )}
+            >
+              Light
+            </button>
+          </div>
         </div>
         {/* Preview */}
         <div
           className="h-16 rounded-lg ring-1 ring-[var(--border)]"
-          style={{ background: `linear-gradient(135deg, ${convoGradientFrom}, ${convoGradientTo})` }}
+          style={{ background: `linear-gradient(135deg, ${currentGradient.from}, ${currentGradient.to})` }}
         />
         <div className="grid grid-cols-2 gap-3">
           <label className="flex flex-col gap-1">
             <div className="flex items-center gap-2">
               <input
                 type="color"
-                value={convoGradientFrom}
+                value={currentGradient.from}
                 onChange={(e) => {
-                  setConvoGradientFrom(e.target.value);
+                  setConvoGradientField(activeGradientScheme, "from", e.target.value);
                   setDraftFrom(e.target.value);
                 }}
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
@@ -1102,9 +1333,10 @@ function AppearanceSettings() {
                 value={draftFrom}
                 onChange={(e) => {
                   setDraftFrom(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) setConvoGradientFrom(e.target.value);
+                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                    setConvoGradientField(activeGradientScheme, "from", e.target.value);
                 }}
-                onBlur={() => setDraftFrom(convoGradientFrom)}
+                onBlur={() => setDraftFrom(currentGradient.from)}
                 className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
               />
             </div>
@@ -1113,9 +1345,9 @@ function AppearanceSettings() {
             <div className="flex items-center gap-2">
               <input
                 type="color"
-                value={convoGradientTo}
+                value={currentGradient.to}
                 onChange={(e) => {
-                  setConvoGradientTo(e.target.value);
+                  setConvoGradientField(activeGradientScheme, "to", e.target.value);
                   setDraftTo(e.target.value);
                 }}
                 className="h-8 w-8 flex-shrink-0 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5"
@@ -1125,24 +1357,28 @@ function AppearanceSettings() {
                 value={draftTo}
                 onChange={(e) => {
                   setDraftTo(e.target.value);
-                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value)) setConvoGradientTo(e.target.value);
+                  if (/^#[0-9a-fA-F]{6}$/.test(e.target.value))
+                    setConvoGradientField(activeGradientScheme, "to", e.target.value);
                 }}
-                onBlur={() => setDraftTo(convoGradientTo)}
+                onBlur={() => setDraftTo(currentGradient.to)}
                 className="w-full rounded-md bg-[var(--secondary)] px-2 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
               />
             </div>
           </label>
         </div>
         <button
+          type="button"
           onClick={() => {
-            setConvoGradientFrom("#0a0a0e");
-            setConvoGradientTo("#1c2133");
-            setDraftFrom("#0a0a0e");
-            setDraftTo("#1c2133");
+            const defaults =
+              activeGradientScheme === "dark" ? { from: "#0a0a0e", to: "#1c2133" } : { from: "#f2eff7", to: "#eae6f0" };
+            setConvoGradientField(activeGradientScheme, "from", defaults.from);
+            setConvoGradientField(activeGradientScheme, "to", defaults.to);
+            setDraftFrom(defaults.from);
+            setDraftTo(defaults.to);
           }}
           className="text-[0.625rem] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors self-start"
         >
-          Reset to default
+          Reset {activeGradientScheme === "dark" ? "Dark" : "Light"} to default
         </button>
       </div>
 
@@ -2001,7 +2237,10 @@ function ImportSettings() {
       }
       const res = await fetch("/api/backup/import-profile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...getAdminSecretHeader(),
+        },
         body: text,
       });
       const data = await res.json();
@@ -2030,7 +2269,7 @@ function ImportSettings() {
       {/* Profile import */}
       <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 px-3 py-3 text-xs font-semibold ring-1 ring-emerald-500/30 transition-all hover:ring-emerald-500/50 active:scale-[0.98]">
         <Download size="1rem" />
-        Import Profile (Full Export)
+        Import Profile (JSON)
         <input type="file" accept=".json" onChange={handleProfileImport} className="hidden" />
       </label>
 
@@ -2111,9 +2350,21 @@ function ImportButton({
     if (!file) return;
     try {
       let res: Response;
+      let importEmbeddedLorebook: boolean | undefined;
 
       // "auto" mode: send binary files (PNG) as multipart, JSON files as JSON body
       const effectiveMode = mode === "auto" ? (file.name.toLowerCase().endsWith(".json") ? "json" : "file") : mode;
+      if (endpoint === "/import/st-character") {
+        const previews = await inspectCharacterFilesForEmbeddedLorebooks([file]);
+        const preview = previews[0];
+        if (preview) {
+          importEmbeddedLorebook = window.confirm(
+            `${preview.name ?? file.name} includes an embedded lorebook with ${preview.embeddedLorebookEntries} entr${
+              preview.embeddedLorebookEntries === 1 ? "y" : "ies"
+            }.\n\nImport it as a standalone Marinara lorebook too?`,
+          );
+        }
+      }
 
       if (effectiveMode === "json") {
         const text = await file.text();
@@ -2122,6 +2373,9 @@ function ImportButton({
         if (endpoint.includes("lorebook") || endpoint.includes("preset")) {
           json.__filename = file.name.replace(/\.json$/i, "");
         }
+        if (endpoint === "/import/st-character" && importEmbeddedLorebook !== undefined) {
+          json.importEmbeddedLorebook = importEmbeddedLorebook;
+        }
         res = await fetch(`/api${endpoint}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2129,6 +2383,9 @@ function ImportButton({
         });
       } else {
         const formData = new FormData();
+        if (endpoint === "/import/st-character" && importEmbeddedLorebook !== undefined) {
+          formData.append("importEmbeddedLorebook", String(importEmbeddedLorebook));
+        }
         formData.append("file", file);
         res = await fetch(`/api${endpoint}`, {
           method: "POST",
@@ -2179,23 +2436,28 @@ function AdvancedSettings() {
   const [selectedScopes, setSelectedScopes] = useState<ExpungeScope[]>(["chats"]);
   const [confirmAction, setConfirmAction] = useState<"selected" | "all" | null>(null);
   const [exportingProfile, setExportingProfile] = useState(false);
+  const [exportProfileDialogOpen, setExportProfileDialogOpen] = useState(false);
   const [refreshingSpa, setRefreshingSpa] = useState(false);
+  const [adminSecret, setAdminSecret] = useState(() => localStorage.getItem(ADMIN_SECRET_STORAGE_KEY) ?? "");
 
-  const handleExportProfile = async () => {
+  const handleExportProfile = async (format: ExportFormatChoice) => {
     setExportingProfile(true);
+    setExportProfileDialogOpen(false);
     try {
-      const res = await fetch("/api/backup/export-profile");
-      if (!res.ok) throw new Error("Export failed");
+      const res = await fetch(`/api/backup/export-profile?format=${format}`, {
+        headers: getAdminSecretHeader(),
+      });
+      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Export failed"));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "marinara-profile.json";
+      a.download = format === "compatible" ? "marinara-compatible-export.zip" : "marinara-profile.json";
       a.click();
       URL.revokeObjectURL(url);
-      toast.success("Profile exported!");
-    } catch {
-      toast.error("Failed to export profile");
+      toast.success(format === "compatible" ? "Compatible export created!" : "Profile exported!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to export profile");
     } finally {
       setExportingProfile(false);
     }
@@ -2232,8 +2494,11 @@ function AdvancedSettings() {
   const handleCreateBackup = async () => {
     setCreatingBackup(true);
     try {
-      const res = await fetch("/api/backup/download", { method: "POST" });
-      if (!res.ok) throw new Error("Backup failed");
+      const res = await fetch("/api/backup/download", {
+        method: "POST",
+        headers: getAdminSecretHeader(),
+      });
+      if (!res.ok) throw new Error(await readSettingsResponseError(res, "Backup failed"));
 
       // Pull the filename from Content-Disposition if provided
       const disposition = res.headers.get("content-disposition") ?? "";
@@ -2287,8 +2552,8 @@ function AdvancedSettings() {
       URL.revokeObjectURL(url);
       toast.success("Backup downloaded!");
       qc.invalidateQueries({ queryKey: ["backups"] });
-    } catch {
-      toast.error("Failed to create backup");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create backup");
     } finally {
       setCreatingBackup(false);
     }
@@ -2319,10 +2584,23 @@ function AdvancedSettings() {
     },
   });
 
+  const saveAdminSecret = useCallback(() => {
+    const trimmed = adminSecret.trim();
+    if (trimmed) {
+      localStorage.setItem(ADMIN_SECRET_STORAGE_KEY, trimmed);
+      toast.success("Admin secret saved for this browser");
+    } else {
+      localStorage.removeItem(ADMIN_SECRET_STORAGE_KEY);
+      toast.info("Admin secret cleared");
+    }
+  }, [adminSecret]);
+
   const updateCheck = useQuery<{
     currentVersion: string;
     currentCommit: string | null;
     currentBuild: string;
+    targetRef: string;
+    targetCommit: string | null;
     latestVersion: string;
     updateAvailable: boolean;
     versionUpdate?: boolean;
@@ -2339,7 +2617,15 @@ function AdvancedSettings() {
   });
 
   const applyUpdate = useMutation({
-    mutationFn: () => api.post<{ status: string; message: string }>("/updates/apply"),
+    mutationFn: () =>
+      api.post<{ status: string; message: string }>("/updates/apply", {
+        confirm: true,
+        currentVersion: updateCheck.data?.currentVersion ?? health.data?.version ?? APP_VERSION,
+        currentCommit: updateCheck.data?.currentCommit ?? health.data?.commit ?? null,
+        currentBuild: updateCheck.data?.currentBuild ?? health.data?.build ?? null,
+        targetRef: updateCheck.data?.targetRef,
+        targetCommit: updateCheck.data?.targetCommit,
+      }),
     onSuccess: (data) => {
       if (data.status === "already_up_to_date") {
         toast.info(data.message);
@@ -2384,7 +2670,40 @@ function AdvancedSettings() {
 
   return (
     <div className="flex flex-col gap-3">
+      <ExportFormatDialog
+        open={exportProfileDialogOpen}
+        title="Export Profile"
+        description="Native creates a Marinara profile JSON for restoring your data in Marinara. Compatible creates a ZIP of folderless JSON files for other platforms."
+        nativeDescription="Keeps Marinara fields, lorebook folders, character/persona metadata, presets, agents, and themes for re-import."
+        compatibleDescription="Exports direct character JSON, simple persona JSON, and folderless lorebooks for other roleplay tools."
+        onClose={() => setExportProfileDialogOpen(false)}
+        onSelect={handleExportProfile}
+      />
+
       <div className="text-xs text-[var(--muted-foreground)]">Advanced settings for power users.</div>
+
+      <div className="flex flex-col gap-2 rounded-lg bg-[var(--secondary)]/40 p-2.5 ring-1 ring-[var(--border)]">
+        <div className="flex items-center gap-1.5">
+          <Power size="0.75rem" className="text-[var(--muted-foreground)]" />
+          <span className="text-xs font-medium">Admin Access</span>
+        </div>
+        <div className="flex gap-2 max-sm:flex-col">
+          <input
+            type="password"
+            value={adminSecret}
+            onChange={(e) => setAdminSecret(e.target.value)}
+            placeholder="ADMIN_SECRET"
+            className="flex-1 rounded-lg bg-[var(--background)] px-3 py-2 text-xs outline-none ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]"
+          />
+          <button
+            onClick={saveAdminSecret}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-white transition-all hover:opacity-90 active:scale-95"
+          >
+            <Save size="0.75rem" />
+            Save
+          </button>
+        </div>
+      </div>
 
       {/* ── Updates ── */}
       <div className="flex flex-col gap-2">
@@ -2572,7 +2891,7 @@ function AdvancedSettings() {
         <div className="flex items-center gap-1.5">
           <Download size="0.75rem" className="text-[var(--muted-foreground)]" />
           <span className="text-xs font-medium">Backup & Export</span>
-          <HelpTooltip text="Download a full backup as a .zip archive (database + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). Your browser will ask where to save it. Useful on mobile where the server's data folder isn't directly accessible." />
+          <HelpTooltip text="Download a full backup as a .zip archive (storage snapshots + avatars, sprites, backgrounds, gallery, fonts, knowledge sources). The zip also includes marinara-profile.json for one-click restore through Import Profile (JSON). The raw folders are for manual recovery." />
         </div>
         <button
           onClick={handleCreateBackup}
@@ -2592,7 +2911,7 @@ function AdvancedSettings() {
           )}
         </button>
         <button
-          onClick={handleExportProfile}
+          onClick={() => setExportProfileDialogOpen(true)}
           disabled={exportingProfile}
           className="flex items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)]/80 active:scale-95 disabled:opacity-50"
         >

@@ -2,11 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { logger } from "../../lib/logger.js";
 import {
   BUILT_IN_AGENTS,
-  LOCAL_SIDECAR_CONNECTION_ID,
+  getDefaultBuiltInAgentSettings,
   type AgentContext,
   type AgentResult,
 } from "@marinara-engine/shared";
 import { eq } from "drizzle-orm";
+import { listCharacterSprites } from "../../services/game/sprite.service.js";
+import { DATA_DIR } from "../../utils/data-dir.js";
 import type { ResolvedAgent } from "../../services/agents/agent-pipeline.js";
 import { executeAgent, executeAgentBatch } from "../../services/agents/agent-executor.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm/local-sidecar.js";
@@ -16,11 +18,13 @@ import { createAgentsStorage } from "../../services/storage/agents.storage.js";
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
 import { createChatsStorage } from "../../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../../services/storage/connections.storage.js";
+import { resolveConnectionImageDefaults } from "../../services/image/image-generation-defaults.js";
+import { loadImageGenerationUserSettings } from "../../services/image/image-generation-settings.js";
 import { createGameStateStorage } from "../../services/storage/game-state.storage.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
 import { syncGameMapMetaPartyPosition } from "../../services/game/map-position.service.js";
 import { gameStateSnapshots as gameStateSnapshotsTable } from "../../db/schema/index.js";
-import { parseExtra, parseGameStateRow, resolveBaseUrl } from "./generate-route-utils.js";
+import { isMessageHiddenFromAI, parseExtra, parseGameStateRow, resolveBaseUrl } from "./generate-route-utils.js";
 import {
   buildHistoricalLorebookKeeperContext,
   getLorebookKeeperBackfillTargets,
@@ -30,6 +34,12 @@ import {
   resolveLorebookKeeperTarget,
 } from "./lorebook-keeper-utils.js";
 import { sendSseEvent, startSseReply } from "./sse.js";
+import {
+  buildLocalSidecarUnavailableWarning,
+  isLocalSidecarConnectionId,
+  type AgentConnectionWarning,
+} from "./agent-connection-guards.js";
+import { validateSpriteExpressionEntries } from "./expression-agent-utils.js";
 import type { GameMap } from "@marinara-engine/shared";
 
 type PersonaContext = {
@@ -46,6 +56,13 @@ type ResolvedRetryAgent = {
   resolved: ResolvedAgent;
   agentProvider: any;
   agentModel: string;
+};
+
+type ResolvedRetryAgents = {
+  conn: any;
+  enabledConfigs: any[];
+  resolvedAgents: ResolvedRetryAgent[];
+  warnings: AgentConnectionWarning[];
 };
 
 function parseJsonIfString<T>(value: T | string): T {
@@ -109,11 +126,13 @@ async function resolvePersonaContext(
 }
 
 async function buildRetryAgentContext(args: {
+  cyoaAgentWillRun: boolean;
   chatId: string;
   chat: any;
   chatMeta: Record<string, unknown>;
   recentMessages: any[];
   enabledConfigs: any[];
+  resolvedAgentTypes: Set<string>;
   lastAssistant: any;
   chars: ReturnType<typeof createCharactersStorage>;
   gameStateStore: ReturnType<typeof createGameStateStorage>;
@@ -121,11 +140,13 @@ async function buildRetryAgentContext(args: {
   streaming: boolean;
 }) {
   const {
+    cyoaAgentWillRun,
     chatId,
     chat,
     chatMeta,
     recentMessages,
     enabledConfigs,
+    resolvedAgentTypes,
     lastAssistant,
     chars,
     gameStateStore,
@@ -233,6 +254,64 @@ async function buildRetryAgentContext(args: {
     agentContext.gameState = parseGameStateRow(latestGS as Record<string, unknown>);
   }
 
+  // CYOA re-rolls: inject the previous choices so the agent generates a fresh,
+  // meaningfully different set instead of repeating the last batch. Mirrors
+  // the same injection in the main generate route.
+  if (cyoaAgentWillRun && lastAssistant) {
+    const lastExtra = parseExtra((lastAssistant as any).extra);
+    if (lastExtra.cyoaChoices) {
+      agentContext.memory._lastCyoaChoices = lastExtra.cyoaChoices;
+    }
+  }
+
+  // If the expression agent is being retried, load available sprite expressions per character
+  if (resolvedAgentTypes.has("expression")) {
+    try {
+      const perChar: Array<{ characterId: string; characterName: string; expressions: string[] }> = [];
+      for (const char of agentContext.characters) {
+        const sprites = listCharacterSprites(char.id);
+        if (sprites && sprites.expressions.length > 0) {
+          perChar.push({ characterId: char.id, characterName: char.name, expressions: sprites.expressions });
+        }
+      }
+      if (perChar.length > 0) {
+        agentContext.memory._availableSprites = perChar;
+      }
+    } catch (err) {
+      logger.warn(err, "[retry-agents] Failed to load available sprites for retry");
+    }
+  }
+
+  // If the background agent is being retried, load available backgrounds into context
+  if (resolvedAgentTypes.has("background")) {
+    try {
+      const { readdirSync, readFileSync, existsSync } = await import("fs");
+      const { join, extname } = await import("path");
+      const bgDir = join(DATA_DIR, "backgrounds");
+      if (existsSync(bgDir)) {
+        const exts = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
+        const files = readdirSync(bgDir).filter((f: string) => exts.has(extname(f).toLowerCase()));
+        let meta: Record<string, { originalName?: string; tags: string[] }> = {};
+        const metaPath = join(bgDir, "meta.json");
+        if (existsSync(metaPath)) {
+          try {
+            meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+          } catch {
+            /* */
+          }
+        }
+        agentContext.memory._availableBackgrounds = files.map((f: string) => ({
+          filename: f,
+          originalName: meta[f]?.originalName ?? null,
+          tags: meta[f]?.tags ?? [],
+        }));
+        agentContext.memory._currentBackground = chatMeta.background ?? null;
+      }
+    } catch (err) {
+      logger.warn(err, "[retry-agents] Failed to load available backgrounds for retry");
+    }
+  }
+
   return agentContext;
 }
 
@@ -241,7 +320,7 @@ async function resolveRetryAgents(args: {
   chat: any;
   conns: ReturnType<typeof createConnectionsStorage>;
   agentsStore: ReturnType<typeof createAgentsStorage>;
-}) {
+}): Promise<ResolvedRetryAgents> {
   const { agentTypes, chat, conns, agentsStore } = args;
   const agentTypeSet = new Set(agentTypes);
   const configs = await agentsStore.list();
@@ -280,6 +359,7 @@ async function resolveRetryAgents(args: {
     conn.maxTokensOverride,
   );
   const resolvedAgents: ResolvedRetryAgent[] = [];
+  const skippedLocalSidecarAgents: string[] = [];
   const localSidecarAvailableForTrackers =
     sidecarModelService.getConfig().useForTrackers && sidecarModelService.getConfiguredModelRef() !== null;
 
@@ -288,10 +368,17 @@ async function resolveRetryAgents(args: {
     let agentModel = conn.model;
 
     if (cfg.connectionId) {
-      if (cfg.connectionId === LOCAL_SIDECAR_CONNECTION_ID && localSidecarAvailableForTrackers) {
+      if (isLocalSidecarConnectionId(cfg.connectionId) && localSidecarAvailableForTrackers) {
         agentProvider = getLocalSidecarProvider();
         agentModel = LOCAL_SIDECAR_MODEL;
-      } else if (cfg.connectionId !== LOCAL_SIDECAR_CONNECTION_ID) {
+      } else if (isLocalSidecarConnectionId(cfg.connectionId)) {
+        skippedLocalSidecarAgents.push(cfg.name ?? cfg.type);
+        logger.warn(
+          "[retry-agents] Skipping agent %s because Local Model was requested but the sidecar is unavailable",
+          cfg.type,
+        );
+        continue;
+      } else {
         const agentConn = await conns.getWithKey(cfg.connectionId as string);
         if (agentConn) {
           const agentBaseUrl = resolveBaseUrl(agentConn);
@@ -328,6 +415,9 @@ async function resolveRetryAgents(args: {
     });
   }
 
+  const warnings =
+    skippedLocalSidecarAgents.length > 0 ? [buildLocalSidecarUnavailableWarning(skippedLocalSidecarAgents)] : [];
+
   for (const builtIn of builtInFallbackConfigs) {
     resolvedAgents.push({
       cfg: { id: `builtin:${builtIn.id}`, type: builtIn.id, name: builtIn.name } as any,
@@ -338,7 +428,7 @@ async function resolveRetryAgents(args: {
         phase: builtIn.phase,
         promptTemplate: "",
         connectionId: null,
-        settings: {},
+        settings: getDefaultBuiltInAgentSettings(builtIn.id),
         provider,
         model: conn.model,
       },
@@ -347,7 +437,7 @@ async function resolveRetryAgents(args: {
     });
   }
 
-  return { conn, enabledConfigs, resolvedAgents };
+  return { conn, enabledConfigs, resolvedAgents, warnings };
 }
 
 async function executeRetryBatches(agentContext: AgentContext, resolvedAgents: ResolvedRetryAgent[]) {
@@ -509,6 +599,20 @@ async function applyRetryResultEffects(args: {
   const chatMeta = parseExtra(chat.metadata) as Record<string, unknown>;
 
   for (const result of sortedResults) {
+    if (result.success && result.type === "text_rewrite" && result.data && typeof result.data === "object") {
+      try {
+        const rewriteData = result.data as Record<string, unknown>;
+        const editedText = (rewriteData.editedText as string) ?? "";
+        const changes = (rewriteData.changes as Array<{ description: string }>) ?? [];
+        if (retryMessageId && editedText && changes.length > 0) {
+          await chats.updateMessageContent(retryMessageId, editedText);
+          sendSseEvent(reply, { type: "text_rewrite", data: { editedText, changes } });
+        }
+      } catch {
+        // Non-critical patching failure.
+      }
+    }
+
     if (result.success && result.type === "game_state_update" && result.data && typeof result.data === "object") {
       try {
         const gs = result.data as Record<string, unknown>;
@@ -674,6 +778,43 @@ async function applyRetryResultEffects(args: {
       }
     }
 
+    // Persist re-rolled CYOA choices onto the last assistant message + active swipe
+    // so they survive a page refresh, and broadcast them to the client store.
+    if (result.success && result.type === "cyoa_choices" && result.data && typeof result.data === "object") {
+      try {
+        const cyoaData = result.data as { choices?: Array<{ label: string; text: string }> };
+        if (retryMessageId && cyoaData.choices && cyoaData.choices.length > 0) {
+          await chats.updateSwipeExtra(retryMessageId, retrySwipeIndex, { cyoaChoices: cyoaData.choices });
+          const msgRow = await chats.getMessage(retryMessageId);
+          if (msgRow && (msgRow.activeSwipeIndex ?? 0) === retrySwipeIndex) {
+            await chats.updateMessageExtra(retryMessageId, { cyoaChoices: cyoaData.choices });
+            logger.info(
+              "[retry-agents] CYOA choices persisted chatId=%s messageId=%s choiceCount=%d",
+              chatId,
+              retryMessageId,
+              cyoaData.choices.length,
+            );
+          } else {
+            logger.info(
+              "[retry-agents] CYOA choices persisted to swipe only (active swipe changed) chatId=%s messageId=%s retrySwipeIndex=%d activeSwipeIndex=%s choiceCount=%d",
+              chatId,
+              retryMessageId,
+              retrySwipeIndex,
+              msgRow?.activeSwipeIndex ?? "null",
+              cyoaData.choices.length,
+            );
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          err,
+          "[retry-agents] CYOA choices persistence failed chatId=%s messageId=%s",
+          chatId,
+          retryMessageId,
+        );
+      }
+    }
+
     if (result.success && result.type === "custom_tracker_update" && result.data && typeof result.data === "object") {
       try {
         const ctData = result.data as Record<string, unknown>;
@@ -709,7 +850,6 @@ async function applyRetryResultEffects(args: {
         const imagePrompt = ((illData.prompt as string) ?? "").trim();
         const negativePrompt = ((illData.negativePrompt as string) ?? "").trim();
         const style = ((illData.style as string) ?? "").trim();
-        const aspectRatio = ((illData.aspectRatio as string) ?? "portrait").trim();
         const illCharacters = Array.isArray(illData.characters) ? (illData.characters as string[]) : [];
 
         if (shouldGenerate && imagePrompt) {
@@ -736,6 +876,8 @@ async function applyRetryResultEffects(args: {
               const imgApiKey = imgConnFull.apiKey || "";
               const imgSource = (imgConnFull as any).imageGenerationSource || imgModel;
               const imgServiceHint = imgConnFull.imageService || imgSource;
+              const imageDefaults = resolveConnectionImageDefaults(imgConnFull);
+              const imageSettings = await loadImageGenerationUserSettings(app.db);
 
               const chatMeta = typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {});
               const selfieRes = (chatMeta.selfieResolution as string) ?? "";
@@ -747,15 +889,9 @@ async function applyRetryResultEffects(args: {
               if (parsedW > 0 && parsedH > 0) {
                 imgWidth = parsedW;
                 imgHeight = parsedH;
-              } else if (aspectRatio === "portrait") {
-                imgWidth = 512;
-                imgHeight = 768;
-              } else if (aspectRatio === "square") {
-                imgWidth = 512;
-                imgHeight = 512;
               } else {
-                imgWidth = 768;
-                imgHeight = 512;
+                imgWidth = imageSettings.selfie.width;
+                imgHeight = imageSettings.selfie.height;
               }
 
               let fullPrompt = style ? `${style}, ${imagePrompt}` : imagePrompt;
@@ -819,6 +955,7 @@ async function applyRetryResultEffects(args: {
                 width: imgWidth,
                 height: imgHeight,
                 comfyWorkflow: (imgConnFull as any).comfyuiWorkflow || undefined,
+                imageDefaults,
                 referenceImage,
                 referenceImages,
               });
@@ -891,6 +1028,23 @@ async function applyRetryResultEffects(args: {
         });
       }
     }
+
+    // ── EXPRESSION ENGINE: persist validated sprite expressions ──
+    // Validation already happened before SSE send; here we just persist to DB.
+    if (result.success && result.type === "sprite_change" && result.data && typeof result.data === "object") {
+      const spriteData = result.data as { expressions?: Array<{ characterId: string; expression: string }> };
+      const exprMap: Record<string, string> = {};
+      if (Array.isArray(spriteData.expressions)) {
+        for (const e of spriteData.expressions) exprMap[e.characterId] = e.expression;
+      }
+      try {
+        const chatsDb = createChatsStorage(app.db);
+        await chatsDb.updateMessageExtra(retryMessageId, { spriteExpressions: exprMap });
+        await chatsDb.updateSwipeExtra(retryMessageId, retrySwipeIndex, { spriteExpressions: exprMap });
+      } catch (err) {
+        logger.warn(err, "[retry-agents] Failed to persist validated sprite expressions");
+      }
+    }
   }
 }
 
@@ -928,20 +1082,27 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
             break;
           }
         }
-        const recentMessages = startIdx > 0 ? allMessages.slice(startIdx) : allMessages;
+        const scopedMessages = startIdx > 0 ? allMessages.slice(startIdx) : allMessages;
+        const supportsHiddenFromAI = chat.mode === "roleplay" || chat.mode === "visual_novel";
+        const recentMessages = supportsHiddenFromAI
+          ? scopedMessages.filter((message: any) => !isMessageHiddenFromAI(message))
+          : scopedMessages;
         const lastAssistant = [...recentMessages].reverse().find((message: any) => message.role === "assistant");
-        const { enabledConfigs, resolvedAgents } = await resolveRetryAgents({
+        const { enabledConfigs, resolvedAgents, warnings } = await resolveRetryAgents({
           agentTypes,
           chat,
           conns,
           agentsStore,
         });
+        const cyoaAgentWillRun = resolvedAgents.some((e) => e.resolved.type === "cyoa");
         const agentContext = await buildRetryAgentContext({
+          cyoaAgentWillRun,
           chatId,
           chat,
           chatMeta,
           recentMessages,
           enabledConfigs,
+          resolvedAgentTypes: new Set(resolvedAgents.map((a) => a.resolved.type)),
           lastAssistant,
           chars,
           gameStateStore,
@@ -950,8 +1111,18 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
         });
 
         sendSseEvent(reply, { type: "agent_start", data: { phase: "retry" } });
+        for (const warning of warnings) {
+          sendSseEvent(reply, { type: "agent_warning", data: warning });
+        }
         const lorebookKeeperAgent = resolvedAgents.find((entry) => entry.resolved.type === "lorebook-keeper") ?? null;
         const nonLorebookAgents = resolvedAgents.filter((entry) => entry.resolved.type !== "lorebook-keeper");
+        if (cyoaAgentWillRun) {
+          logger.info(
+            "[retry-agents] CYOA re-roll chatId=%s assistantMessageId=%s",
+            chatId,
+            lastAssistant?.id ?? "none",
+          );
+        }
         const results = nonLorebookAgents.length > 0 ? await executeRetryBatches(agentContext, nonLorebookAgents) : [];
         const lorebookKeeperRunEntries = lorebookKeeperAgent
           ? await executeLorebookKeeperRetries({
@@ -968,6 +1139,35 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
             })
           : [];
 
+        // ── Pre-validate expression results before sending SSE events ──
+        // Validation must happen before the SSE send, otherwise the client receives
+        // unvalidated expressions that may not have matching sprite files.
+        for (const result of results) {
+          if (result.success && result.type === "sprite_change" && result.data && typeof result.data === "object") {
+            const spriteData = result.data as {
+              expressions?: Array<{
+                characterId: string;
+                characterName?: string;
+                expression: string;
+                transition?: string;
+              }>;
+            };
+            const availableSprites = agentContext.memory._availableSprites as
+              | Array<{ characterId: string; characterName: string; expressions: string[] }>
+              | undefined;
+            if (Array.isArray(spriteData.expressions) && Array.isArray(availableSprites)) {
+              const validation = validateSpriteExpressionEntries(spriteData.expressions, availableSprites);
+              spriteData.expressions = validation.expressions;
+              for (const warning of validation.warnings) {
+                logger.warn("[retry-agents] %s", warning.message);
+              }
+            } else if (!Array.isArray(availableSprites)) {
+              // No sprite catalog loaded — drop expressions entirely so unvalidated data is never forwarded
+              spriteData.expressions = [];
+            }
+          }
+        }
+
         for (const result of results) {
           const cfg = resolvedAgents.find((entry) => entry.resolved.type === result.agentType)?.cfg;
           sendSseEvent(reply, {
@@ -982,6 +1182,13 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
               durationMs: result.durationMs,
             },
           });
+        }
+
+        if (cyoaAgentWillRun) {
+          const cyoaRetry = results.find((r) => r.agentType === "cyoa");
+          if (cyoaRetry && !cyoaRetry.success) {
+            logger.warn("[retry-agents] CYOA re-roll failed chatId=%s: %s", chatId, cyoaRetry.error ?? "unknown");
+          }
         }
 
         for (const entry of lorebookKeeperRunEntries) {

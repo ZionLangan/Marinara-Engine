@@ -76,7 +76,7 @@ export function Modal({ open, onClose, title, children, width = "max-w-md" }: Mo
       aria-modal="true"
       aria-label={title}
       data-component="Modal"
-      className="mari-modal fixed inset-0 z-50 flex items-center justify-center p-4 max-md:pt-[max(1rem,env(safe-area-inset-top))]"
+      className="mari-modal fixed inset-0 z-50 flex items-center justify-center p-3 max-md:pt-[max(0.75rem,env(safe-area-inset-top))] max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4"
       style={{
         opacity: isEntering ? 1 : 0,
         transition: "opacity 150ms ease-out",
@@ -97,7 +97,7 @@ export function Modal({ open, onClose, title, children, width = "max-w-md" }: Mo
 
       {/* Panel - OS Window style */}
       <div
-        className={`mari-modal-panel os-window relative flex w-full flex-col ${width} max-h-[90vh] shadow-2xl shadow-black/50`}
+        className={`mari-modal-panel os-window relative flex w-full flex-col ${width} max-h-[calc(100dvh-1.5rem)] sm:max-h-[min(90dvh,52rem)] shadow-2xl shadow-black/50`}
         style={{
           opacity: isEntering ? 1 : 0,
           transform: isEntering ? "scale(1) translateY(0)" : "scale(0.97) translateY(6px)",
@@ -118,7 +118,7 @@ export function Modal({ open, onClose, title, children, width = "max-w-md" }: Mo
         </div>
 
         {/* Content */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4">{children}</div>
       </div>
     </div>
   );

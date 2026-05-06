@@ -2,7 +2,7 @@
 // Chat: Conversation Input — Discord-style
 // ──────────────────────────────────────────────
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Send, Smile, StopCircle, X, Plus, ImagePlay, AtSign, Users } from "lucide-react";
+import { Send, Smile, StopCircle, X, Plus, ImagePlay, AtSign, Users, Languages, Loader2, FileText } from "lucide-react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -10,7 +10,7 @@ import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
-import { useCreateMessage, useChat, chatKeys } from "../../hooks/use-chats";
+import { useCreateMessage, useUpdateMessageExtra, useChat, chatKeys } from "../../hooks/use-chats";
 import { characterKeys } from "../../hooks/use-characters";
 import {
   matchSlashCommand,
@@ -18,20 +18,77 @@ import {
   type SlashCommand,
   type SlashCommandContext,
 } from "../../lib/slash-commands";
-import { resolveInputMacrosForChat } from "../../lib/chat-macros";
+import { isPromptPreviewMacro, resolveInputMacrosForChat } from "../../lib/chat-macros";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { translateDraftText } from "../../lib/draft-translation";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
 import { QuickPersonaSwitcher } from "./QuickPersonaSwitcher";
 import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { GifPicker } from "../ui/GifPicker";
+import { SpeechToTextButton } from "../ui/SpeechToTextButton";
 import { MariThinkingIndicator } from "./MariThinkingIndicator";
+import { MariCapabilityNotice } from "./MariCapabilityNotice";
 import { SlashCommandFeedback } from "./SlashCommandFeedback";
 
 interface Attachment {
   type: string;
   data: string;
   name: string;
+}
+
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  "csv",
+  "json",
+  "jsonl",
+  "log",
+  "markdown",
+  "md",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
+function getFileExtension(fileName: string): string {
+  const match = fileName.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] ?? "";
+}
+
+function inferAttachmentType(file: File): string {
+  if (file.type) return file.type;
+  const extension = getFileExtension(file.name);
+  if (extension === "json" || extension === "jsonl") return "application/json";
+  if (extension === "csv") return "text/csv";
+  if (extension === "md" || extension === "markdown") return "text/markdown";
+  if (extension === "xml") return "application/xml";
+  if (extension === "yaml" || extension === "yml") return "application/yaml";
+  if (extension === "txt" || extension === "log") return "text/plain";
+  return "application/octet-stream";
+}
+
+function isSupportedChatAttachment(file: File): boolean {
+  if (file.type.startsWith("image/")) return true;
+  if (file.type.startsWith("text/")) return true;
+  const type = inferAttachmentType(file);
+  if (
+    type === "application/json" ||
+    type === "application/xml" ||
+    type === "application/yaml" ||
+    type === "application/x-yaml"
+  ) {
+    return true;
+  }
+  return TEXT_ATTACHMENT_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 /** Convert a GIF (or any image) blob to PNG via canvas, returning a new Blob + data URL */
@@ -88,14 +145,22 @@ interface ConversationInputProps {
     conversationStatus?: "online" | "idle" | "dnd" | "offline";
     conversationActivity?: string;
   }>;
+  onPeekPrompt?: () => void;
 }
 
-export function ConversationInput({ characterNames = [], groupResponseOrder, chatCharacters }: ConversationInputProps) {
+export function ConversationInput({
+  characterNames = [],
+  groupResponseOrder,
+  chatCharacters,
+  onPeekPrompt,
+}: ConversationInputProps) {
   const [hasInput, setHasInput] = useState(false);
   const [completions, setCompletions] = useState<SlashCommand[]>([]);
   const [selectedCompletion, setSelectedCompletion] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [pendingAttachmentReads, setPendingAttachmentReads] = useState(0);
+  const [isTranslatingDraft, setIsTranslatingDraft] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [gifOpen, setGifOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -130,9 +195,12 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   const { applyToUserInput } = useApplyRegex();
   const enterToSend = useUIStore((s) => s.enterToSendConvo);
   const guideGenerations = useUIStore((s) => s.guideGenerations);
+  const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const createMessage = useCreateMessage(activeChatId);
+  const updateMessageExtra = useUpdateMessageExtra(activeChatId);
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isReadingAttachments = pendingAttachmentReads > 0;
 
   const syncInputState = useCallback(
     (value: string) => {
@@ -171,32 +239,52 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     };
   }, [activeChatId]);
 
-  const handleFileUpload = useCallback(async (files: FileList | null) => {
+  const handleFileUpload = useCallback(async (files: FileList | File[] | null) => {
     if (!files) return;
     const MAX_SIZE = 20 * 1024 * 1024;
-    for (const file of Array.from(files)) {
+    const acceptedFiles = Array.from(files).filter((file) => {
       if (file.size > MAX_SIZE) {
         toast.error(`${file.name} exceeds 20 MB limit`);
-        continue;
+        return false;
       }
+      if (!isSupportedChatAttachment(file)) {
+        toast.error(
+          `${file.name || "That file"} is not supported in chat. Attach images or text files like JSON, TXT, Markdown, or CSV.`,
+        );
+        return false;
+      }
+      return true;
+    });
+
+    if (acceptedFiles.length === 0) return;
+    setPendingAttachmentReads((count) => count + acceptedFiles.length);
+
+    for (const file of acceptedFiles) {
+      const displayName = file.name || "pasted-file";
       // Convert GIFs to PNG (Gemini and some providers don't support image/gif)
       if (file.type === "image/gif") {
         try {
           const { dataUrl } = await convertToPng(file);
           setAttachments((prev) => [
             ...prev,
-            { type: "image/png", data: dataUrl, name: file.name.replace(/\.gif$/i, ".png") },
+            { type: "image/png", data: dataUrl, name: displayName.replace(/\.gif$/i, ".png") },
           ]);
         } catch {
-          toast.error(`Failed to convert ${file.name}`);
+          toast.error(`Failed to convert ${displayName}`);
+        } finally {
+          setPendingAttachmentReads((count) => Math.max(0, count - 1));
         }
         continue;
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        setAttachments((prev) => [...prev, { type: file.type, data: reader.result as string, name: file.name }]);
-      };
-      reader.readAsDataURL(file);
+
+      try {
+        const data = await readFileAsDataUrl(file);
+        setAttachments((prev) => [...prev, { type: inferAttachmentType(file), data, name: displayName }]);
+      } catch {
+        toast.error(`Failed to read ${displayName}`);
+      } finally {
+        setPendingAttachmentReads((count) => Math.max(0, count - 1));
+      }
     }
   }, []);
 
@@ -204,18 +292,16 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     (e: React.ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items || !activeChatId) return;
-      const imageFiles: File[] = [];
+      const files: File[] = [];
       for (const item of Array.from(items)) {
-        if (item.kind === "file" && item.type.startsWith("image/")) {
+        if (item.kind === "file") {
           const file = item.getAsFile();
-          if (file) imageFiles.push(file);
+          if (file) files.push(file);
         }
       }
-      if (imageFiles.length > 0) {
+      if (files.length > 0) {
         e.preventDefault();
-        const dt = new DataTransfer();
-        for (const f of imageFiles) dt.items.add(f);
-        handleFileUpload(dt.files);
+        handleFileUpload(files);
       }
     },
     [activeChatId, handleFileUpload],
@@ -226,11 +312,9 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       e.preventDefault();
       setIsDragging(false);
       if (!activeChatId) return;
-      const imageFiles = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
-      if (imageFiles.length > 0) {
-        const dt = new DataTransfer();
-        for (const f of imageFiles) dt.items.add(f);
-        handleFileUpload(dt.files);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length > 0) {
+        handleFileUpload(files);
       }
     },
     [activeChatId, handleFileUpload],
@@ -286,10 +370,27 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
 
   const handleSend = useCallback(async () => {
     if (!activeChatId) return;
+    if (isReadingAttachments) {
+      toast.info("Still reading attached files. Send will be ready in a moment.");
+      return;
+    }
     const raw = textareaRef.current?.value.trim() ?? "";
     if (!raw && attachments.length === 0) {
       return;
     }
+
+    if (isPromptPreviewMacro(raw)) {
+      if (textareaRef.current) {
+        textareaRef.current.value = "";
+        textareaRef.current.style.height = "auto";
+      }
+      clearInputDraft(activeChatId);
+      syncInputState("");
+      setAttachments([]);
+      onPeekPrompt?.();
+      return;
+    }
+
     // If already generating for this chat, just save the message without
     // triggering another generation — the in-progress generation will see
     // it (server re-reads messages after any busy delay).
@@ -320,14 +421,24 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       }
       clearInputDraft(activeChatId);
       syncInputState("");
-      const currentAttachments = [...attachments];
+      const currentAttachments = attachments.map((a) => ({
+        type: a.type,
+        data: a.data,
+        filename: a.name,
+        name: a.name,
+      }));
       setAttachments([]);
-      createMessage.mutate({
+      const created = await createMessage.mutateAsync({
         role: "user",
         content: message,
         characterId: null,
-        ...(currentAttachments.length > 0 && { attachments: currentAttachments }),
       });
+      if (currentAttachments.length) {
+        await updateMessageExtra.mutateAsync({
+          messageId: created.id,
+          extra: { attachments: currentAttachments },
+        });
+      }
       return;
     }
 
@@ -382,18 +493,24 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
     clearInputDraft(activeChatId);
     syncInputState("");
 
-    const pendingAttachments = attachments.map((a) => ({ type: a.type, data: a.data }));
+    const pendingAttachments = attachments.map((a) => ({ type: a.type, data: a.data, filename: a.name, name: a.name }));
     setAttachments([]);
 
     // Extract @mentions from the raw message (before regex transforms)
     const mentioned = extractMentions(raw);
 
     if (groupResponseOrder === "manual" && mentioned.length === 0) {
-      await createMessage.mutateAsync({
+      const created = await createMessage.mutateAsync({
         role: "user",
         content: message,
         characterId: null,
       });
+      if (pendingAttachments.length) {
+        await updateMessageExtra.mutateAsync({
+          messageId: created.id,
+          extra: { attachments: pendingAttachments },
+        });
+      }
       return;
     }
 
@@ -407,16 +524,19 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   }, [
     activeChatId,
     attachments,
+    isReadingAttachments,
     isStreaming,
     generate,
     applyToUserInput,
     extractMentions,
     clearInputDraft,
     createMessage,
+    updateMessageExtra,
     characterNames,
     groupResponseOrder,
     qc,
     syncInputState,
+    onPeekPrompt,
   ]);
 
   const handleKeyDown = useCallback(
@@ -644,6 +764,63 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
   }, [charPickerOpen]);
 
   const showCharPicker = groupResponseOrder === "manual" && !!chatCharacters && chatCharacters.length > 1;
+  const chatMetadata = activeChat?.metadata
+    ? typeof activeChat.metadata === "string"
+      ? (() => {
+          try {
+            return JSON.parse(activeChat.metadata) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })()
+      : (activeChat.metadata as Record<string, unknown>)
+    : {};
+  const showDraftTranslateButton = chatMetadata.showInputTranslateButton === true;
+
+  const handleTranslateDraft = useCallback(async () => {
+    if (!activeChatId || isTranslatingDraft) return;
+    const raw = textareaRef.current?.value ?? "";
+    if (!raw.trim()) return;
+
+    setIsTranslatingDraft(true);
+    try {
+      const translated = await translateDraftText(raw);
+      if (!translated || !textareaRef.current) return;
+      textareaRef.current.value = translated;
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
+      syncInputState(translated);
+      setInputDraft(activeChatId, translated);
+      textareaRef.current.focus();
+    } finally {
+      setIsTranslatingDraft(false);
+    }
+  }, [activeChatId, isTranslatingDraft, setInputDraft, syncInputState]);
+
+  const handleSpeechTranscript = useCallback(
+    (transcript: string) => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? start;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      const prefix = before && !/\s$/.test(before) ? " " : "";
+      const suffix = after && !/^\s/.test(after) ? " " : "";
+      const nextValue = `${before}${prefix}${transcript}${suffix}${after}`;
+      const nextCursor = before.length + prefix.length + transcript.length;
+
+      el.value = nextValue;
+      el.setSelectionRange(nextCursor, nextCursor);
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+      syncInputState(nextValue);
+      if (activeChatId) setInputDraft(activeChatId, nextValue);
+      el.focus();
+    },
+    [activeChatId, setInputDraft, syncInputState],
+  );
+
   const statusDotClass = (status?: string) =>
     status === "offline"
       ? "bg-gray-400"
@@ -718,13 +895,16 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
       )}
 
       {/* Attachment preview */}
-      {attachments.length > 0 && (
+      {(attachments.length > 0 || isReadingAttachments) && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachments.map((att, i) => (
             <div
               key={i}
               className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs ring-1 ring-[var(--border)]"
             >
+              {att.type.startsWith("image/") ? null : (
+                <FileText size="0.875rem" className="shrink-0 text-[var(--muted-foreground)]" />
+              )}
               <span className="max-w-[120px] truncate">{att.name}</span>
               <button
                 onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
@@ -734,10 +914,17 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
               </button>
             </div>
           ))}
+          {isReadingAttachments && (
+            <div className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+              <Loader2 size="0.875rem" className="animate-spin" />
+              Reading file...
+            </div>
+          )}
         </div>
       )}
 
-      {/* Mari command-execution indicator */}
+      {/* Mari capability + thinking indicators */}
+      <MariCapabilityNotice />
       <MariThinkingIndicator />
 
       {/* Input bar */}
@@ -755,9 +942,13 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
         <input
           ref={fileInputRef}
           type="file"
+          accept="image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
           multiple
           className="hidden"
-          onChange={(e) => handleFileUpload(e.target.files)}
+          onChange={(e) => {
+            void handleFileUpload(e.target.files);
+            e.target.value = "";
+          }}
         />
         <button
           onClick={() => fileInputRef.current?.click()}
@@ -870,13 +1061,40 @@ export function ConversationInput({ characterNames = [], groupResponseOrder, cha
             </button>
           )}
 
+          {showDraftTranslateButton && (
+            <button
+              type="button"
+              onClick={() => void handleTranslateDraft()}
+              disabled={!activeChatId || !hasInput || isTranslatingDraft}
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
+                hasInput && !isTranslatingDraft
+                  ? "text-foreground/70 hover:bg-foreground/10 hover:text-foreground"
+                  : "text-foreground/25",
+              )}
+              title="Translate draft"
+            >
+              {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
+            </button>
+          )}
+
+          {speechToTextEnabled && (
+            <SpeechToTextButton
+              disabled={!activeChatId}
+              onTranscript={handleSpeechTranscript}
+              className="rounded-full"
+              iconSize={16}
+            />
+          )}
+
           <button
             onClick={isActuallyGenerating ? () => useChatStore.getState().stopGeneration() : handleSend}
+            disabled={!isActuallyGenerating && isReadingAttachments}
             className={cn(
               "flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-200",
               isActuallyGenerating
                 ? "text-foreground hover:opacity-80"
-                : hasInput || attachments.length > 0
+                : (hasInput || attachments.length > 0) && !isReadingAttachments
                   ? "text-foreground hover:text-foreground/80 active:scale-90"
                   : "text-foreground/20",
             )}

@@ -137,11 +137,84 @@ export function cleanTTSInputText(value: string): string {
     .trim();
 }
 
+const DEFAULT_TTS_CHUNK_CHAR_LIMIT = 900;
+
+function splitOversizedTTSPiece(value: string, maxChars: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  const words = value.split(/\s+/).filter(Boolean);
+
+  for (const word of words) {
+    if (word.length > maxChars) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      for (let index = 0; index < word.length; index += maxChars) {
+        chunks.push(word.slice(index, index + maxChars));
+      }
+      continue;
+    }
+
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxChars) {
+      current = next;
+    } else {
+      if (current) chunks.push(current);
+      current = word;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function packTTSChunkPieces(pieces: string[], maxChars: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const piece of pieces.map((part) => part.trim()).filter(Boolean)) {
+    if (piece.length > maxChars) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      const clausePieces = piece.match(/[^,;:]+[,;:]?|[,;:]+/g)?.filter((part) => part.trim()) ?? [];
+      if (clausePieces.length > 1 && clausePieces.every((part) => part.trim().length < piece.length)) {
+        chunks.push(...packTTSChunkPieces(clausePieces, maxChars));
+      } else {
+        chunks.push(...splitOversizedTTSPiece(piece, maxChars));
+      }
+      continue;
+    }
+
+    const next = current ? `${current} ${piece}` : piece;
+    if (next.length <= maxChars) {
+      current = next;
+    } else {
+      if (current) chunks.push(current);
+      current = piece;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function splitCleanTTSInputIntoChunks(value: string, maxChars = DEFAULT_TTS_CHUNK_CHAR_LIMIT): string[] {
+  if (value.length <= maxChars) return [value];
+  const sentencePieces = value.match(/[^.!?…。！？]+(?:[.!?…。！？]+["')\]}»”’]*)?|[.!?…。！？]+["')\]}»”’]*|.+/g) ?? [
+    value,
+  ];
+  return packTTSChunkPieces(sentencePieces, maxChars);
+}
+
 export function splitTTSChunks(value: string): string[] {
   return value
     .split(/\r?\n+/)
     .map(cleanTTSInputText)
-    .filter(Boolean);
+    .filter(Boolean)
+    .flatMap((chunk) => splitCleanTTSInputIntoChunks(chunk));
 }
 
 export function buildTTSMessageText(text: string, config: TTSConfig, fallbackSpeaker?: string | null): string {

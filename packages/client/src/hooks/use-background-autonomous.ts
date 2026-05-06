@@ -125,16 +125,18 @@ export function useBackgroundAutonomousPolling() {
             // Generate in background (after optional delay)
             generatingForRef.current.add(chat.id);
             const doGenerate = async () => {
+              let receivedTokens = false;
+              let shouldClearAutonomousFlag = true;
               try {
                 // Re-check guard — a generation may have started for this chat
                 // during the busy delay.
                 if (useChatStore.getState().abortControllers.has(chat.id)) {
+                  shouldClearAutonomousFlag = false;
                   generatingForRef.current.delete(chat.id);
                   return;
                 }
 
                 // Use streamEvents to drain the SSE — tokens aren't needed for background chats
-                let receivedTokens = false;
                 for await (const _event of api.streamEvents("/generate", {
                   chatId: chat.id,
                   connectionId: null,
@@ -145,16 +147,6 @@ export function useBackgroundAutonomousPolling() {
 
                 // Only notify if the generation actually produced a message
                 if (!receivedTokens) return;
-
-                // Record assistant activity
-                try {
-                  await api.post("/conversation/activity/assistant", {
-                    chatId: chat.id,
-                    characterId,
-                  });
-                } catch {
-                  /* non-critical */
-                }
 
                 // Reset + refetch messages so the cache has fresh data when the
                 // user navigates to this chat. Without this, TanStack Query
@@ -197,6 +189,13 @@ export function useBackgroundAutonomousPolling() {
               } catch {
                 // generation failed — non-critical
               } finally {
+                if (!receivedTokens && shouldClearAutonomousFlag) {
+                  try {
+                    await api.post("/conversation/activity/assistant", { chatId: chat.id });
+                  } catch {
+                    /* non-critical */
+                  }
+                }
                 generatingForRef.current.delete(chat.id);
               }
             };

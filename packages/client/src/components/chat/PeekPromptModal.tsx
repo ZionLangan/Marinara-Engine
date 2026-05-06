@@ -21,6 +21,7 @@ interface GenerationInfo {
   showThoughts?: boolean | null;
   reasoningEffort?: string | null;
   verbosity?: string | null;
+  assistantPrefill?: string | null;
   tokensPrompt?: number | null;
   tokensCompletion?: number | null;
   tokensCachedPrompt?: number | null;
@@ -377,16 +378,18 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
     const pills: Array<{ label: string; value: string }> = [];
     if (gen) {
       if (gen.temperature != null) pills.push({ label: "Temperature", value: String(gen.temperature) });
-      if (gen.maxTokens != null) pills.push({ label: "Max Tokens", value: fmtTokens(gen.maxTokens) });
+      if (gen.maxTokens != null) pills.push({ label: "Max Output Tokens", value: fmtTokens(gen.maxTokens) });
       if (gen.showThoughts) pills.push({ label: "Thinking", value: "On" });
       if (gen.reasoningEffort) pills.push({ label: "Reasoning", value: gen.reasoningEffort });
       if (gen.verbosity) pills.push({ label: "Verbosity", value: gen.verbosity });
+      if (gen.assistantPrefill) pills.push({ label: "Assistant Prefill", value: "On" });
     } else if (params) {
       if (params.temperature != null) pills.push({ label: "Temperature", value: String(params.temperature) });
       if (params.topP != null && params.topP !== 1) pills.push({ label: "Top P", value: String(params.topP) });
       if (params.topK != null && params.topK !== 0) pills.push({ label: "Top K", value: String(params.topK) });
       if (params.minP != null && params.minP !== 0) pills.push({ label: "Min P", value: String(params.minP) });
-      if (params.maxTokens != null) pills.push({ label: "Max Tokens", value: fmtTokens(params.maxTokens as number) });
+      if (params.maxTokens != null)
+        pills.push({ label: "Max Output Tokens", value: fmtTokens(params.maxTokens as number) });
       if (params.frequencyPenalty != null && params.frequencyPenalty !== 0)
         pills.push({ label: "Freq Penalty", value: String(params.frequencyPenalty) });
       if (params.presencePenalty != null && params.presencePenalty !== 0)
@@ -394,6 +397,7 @@ export function PeekPromptModal({ data, onClose }: PeekPromptModalProps) {
       if (params.showThoughts) pills.push({ label: "Thinking", value: "On" });
       if (params.reasoningEffort) pills.push({ label: "Reasoning", value: String(params.reasoningEffort) });
       if (params.verbosity) pills.push({ label: "Verbosity", value: String(params.verbosity) });
+      if (params.assistantPrefill) pills.push({ label: "Assistant Prefill", value: "On" });
     }
     return pills;
   }, [gen, params]);

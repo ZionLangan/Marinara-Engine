@@ -12,13 +12,18 @@ import {
   ButtplugClient,
   ButtplugNodeWebsocketClientConnector,
   ButtplugClientDevice,
+  DeviceOutput,
   DeviceOutputValueConstructor,
-  DeviceOutputPositionWithDurationConstructor,
   OutputType,
 } from "buttplug";
 import type { HapticDevice, HapticCapability, HapticDeviceCommand, HapticStatus } from "@marinara-engine/shared";
 
 const DEFAULT_SERVER_URL = "ws://127.0.0.1:12345";
+
+const POSITION_WITH_DURATION_OUTPUT =
+  (OutputType as unknown as Record<string, OutputType | undefined>).HwPositionWithDuration ??
+  (OutputType as unknown as Record<string, OutputType | undefined>).PositionWithDuration ??
+  null;
 
 /** OutputType values we map to capabilities. */
 const CAPABILITY_TYPES: Array<{ type: OutputType; cap: HapticCapability }> = [
@@ -28,18 +33,48 @@ const CAPABILITY_TYPES: Array<{ type: OutputType; cap: HapticCapability }> = [
   { type: OutputType.Constrict, cap: "constrict" },
   { type: OutputType.Inflate, cap: "inflate" },
   { type: OutputType.Position, cap: "position" },
-  { type: OutputType.PositionWithDuration, cap: "position" },
 ];
+if (POSITION_WITH_DURATION_OUTPUT) CAPABILITY_TYPES.push({ type: POSITION_WITH_DURATION_OUTPUT, cap: "position" });
 
 /** Map our action strings to buttplug OutputType. */
-const ACTION_TO_OUTPUT: Record<string, OutputType> = {
+const ACTION_TO_OUTPUT: Partial<Record<HapticDeviceCommand["action"], OutputType>> = {
   vibrate: OutputType.Vibrate,
   rotate: OutputType.Rotate,
   oscillate: OutputType.Oscillate,
   constrict: OutputType.Constrict,
   inflate: OutputType.Inflate,
-  position: OutputType.PositionWithDuration,
 };
+
+function normalizeAction(action: unknown): HapticDeviceCommand["action"] | null {
+  if (typeof action !== "string") return null;
+  const key = action
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  if (key === "positionwithduration" || key === "hwpositionwithduration" || key === "linear") return "position";
+  if (key === "vibrate") return "vibrate";
+  if (key === "rotate") return "rotate";
+  if (key === "oscillate") return "oscillate";
+  if (key === "constrict") return "constrict";
+  if (key === "inflate") return "inflate";
+  if (key === "position") return "position";
+  if (key === "stop") return "stop";
+  return null;
+}
+
+function clampUnit(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : fallback;
+}
+
+function durationSeconds(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? Math.max(0, numeric) : 0;
+}
+
+function deviceName(device: ButtplugClientDevice): string {
+  return device.displayName || device.name || `Device ${device.index}`;
+}
 
 /** Helper: get all devices from the client Map as an array. */
 function devicesArray(client: ButtplugClient): ButtplugClientDevice[] {
@@ -149,38 +184,53 @@ class ButtplugService {
     const targets = this.resolveTargets(cmd.deviceIndex);
     if (targets.length === 0) return;
 
+    const action = normalizeAction(cmd.action);
+    if (!action) throw new Error(`Unknown action: ${String(cmd.action)}`);
+
     // Handle stop command
-    if (cmd.action === "stop") {
+    if (action === "stop") {
       for (const device of targets) {
         await device.stop();
       }
       return;
     }
 
-    const outputType = ACTION_TO_OUTPUT[cmd.action];
-    if (!outputType) throw new Error(`Unknown action: ${cmd.action}`);
-
-    const rawIntensity = cmd.intensity ?? 0.5;
-    const rawDuration = cmd.duration ?? 0;
-    const intensity = Number.isFinite(rawIntensity) ? Math.max(0, Math.min(1, rawIntensity)) : 0.5;
-    const duration = Number.isFinite(rawDuration) ? Math.max(0, rawDuration) : 0;
+    const outputType = ACTION_TO_OUTPUT[action];
+    const intensity = clampUnit(cmd.intensity, 0.5);
+    const duration = durationSeconds(cmd.duration);
+    let successfulTargets = 0;
+    let firstFailure: unknown = null;
 
     for (const device of targets) {
-      if (!device.hasOutput(outputType)) continue;
+      try {
+        if (action === "position") {
+          const durationMs = Math.max(1, duration || 1) * 1000;
+          if (POSITION_WITH_DURATION_OUTPUT && device.hasOutput(POSITION_WITH_DURATION_OUTPUT)) {
+            await device.runOutput(DeviceOutput.PositionWithDuration.percent(intensity, durationMs));
+            successfulTargets++;
+          } else if (device.hasOutput(OutputType.Position)) {
+            await device.runOutput(DeviceOutput.Position.percent(intensity));
+            successfulTargets++;
+          }
+          continue;
+        }
 
-      if (cmd.action === "position") {
-        // Position/linear commands use duration in ms
-        const durationMs = (duration || 1) * 1000;
-        const posCmd = new DeviceOutputPositionWithDurationConstructor().percent(intensity, durationMs);
-        await device.runOutput(posCmd);
-      } else {
+        if (!outputType || !device.hasOutput(outputType)) continue;
         const outCmd = new DeviceOutputValueConstructor(outputType).percent(intensity);
         await device.runOutput(outCmd);
+        successfulTargets++;
+      } catch (err) {
+        firstFailure ??= err;
+        logger.warn(err, "[haptic] Command %s failed for %s (index %d)", action, deviceName(device), device.index);
       }
     }
 
+    if (successfulTargets === 0 && firstFailure) {
+      throw firstFailure instanceof Error ? firstFailure : new Error(String(firstFailure));
+    }
+
     // Schedule auto-stop if duration is specified and action isn't position
-    if (duration > 0 && cmd.action !== "position") {
+    if (duration > 0 && action !== "position" && successfulTargets > 0) {
       const timerKey = cmd.deviceIndex;
       // Clear any existing timer for this target
       const existing = this.stopTimers.get(timerKey);

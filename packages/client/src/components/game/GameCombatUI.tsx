@@ -520,6 +520,7 @@ export function GameCombatUI({
 
       void (async () => {
         const blobs: Blob[] = [];
+        let failed = false;
         for (const [chunkIndex, chunk] of line.chunks.entries()) {
           if (controller.signal.aborted) break;
           const chunkKey = `${line.voiceKey}:${chunkIndex}`;
@@ -535,16 +536,24 @@ export function GameCombatUI({
             blobs.push(blob);
           } catch (err) {
             if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) break;
-            console.warn("[combat-tts] Failed to generate combat voice line", err);
+            failed = true;
+            console.warn(
+              `[combat-tts] Failed to generate combat voice line chunk ${chunkIndex + 1}/${line.chunks.length}`,
+              err,
+            );
+            break;
           }
         }
 
         try {
           if (controller.signal.aborted) return;
           const urls = blobs.map((blob) => URL.createObjectURL(blob));
+          if (failed || urls.length !== line.chunks.length) {
+            for (const url of urls) URL.revokeObjectURL(url);
+          }
           combatVoiceCacheRef.current.set(
             line.voiceKey,
-            urls.length > 0 ? { status: "ready", urls } : { status: "error" },
+            !failed && urls.length === line.chunks.length ? { status: "ready", urls } : { status: "error" },
           );
         } finally {
           combatVoicePendingRef.current.delete(line.voiceKey);

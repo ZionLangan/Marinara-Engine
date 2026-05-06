@@ -56,16 +56,19 @@ export interface SupportedMacroDefinition {
   description: string;
 }
 
-const CHARACTER_MACRO_PATTERN = /\{\{(?:char|description|personality|backstory|appearance|scenario|example)\}\}/i;
+const CHARACTER_MACRO_PATTERN =
+  /\{\{(?:char|charName|description|personality|backstory|appearance|scenario|example)\}\}/i;
 
 export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Identity", syntax: "{{user}}", description: "Current user or persona name" },
+  { category: "Identity", syntax: "{{userName}}", description: "Alias for {{user}}" },
   {
     category: "Identity",
     syntax: "{{persona}}",
     description: "Active persona description, personality, backstory, appearance, and scenario joined by new lines",
   },
   { category: "Identity", syntax: "{{char}}", description: "Current character name" },
+  { category: "Identity", syntax: "{{charName}}", description: "Alias for {{char}}" },
   { category: "Identity", syntax: "{{characters}}", description: "All character names, comma-separated" },
   { category: "Character", syntax: "{{description}}", description: "Current character description" },
   { category: "Character", syntax: "{{personality}}", description: "Current character personality" },
@@ -83,6 +86,7 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Time", syntax: "{{weekday}}", description: "Current weekday name" },
   { category: "Random", syntax: "{{random}}", description: "Random number from 0 to 100" },
   { category: "Random", syntax: "{{random:X:Y}}", description: "Random number between X and Y" },
+  { category: "Random", syntax: "{{random::A::B::C}}", description: "Randomly choose one of the provided options" },
   { category: "Random", syntax: "{{roll:XdY}}", description: "Dice roll total such as 2d6" },
   { category: "Variables", syntax: "{{getvar::name}}", description: "Read a dynamic variable" },
   { category: "Variables", syntax: "{{setvar::name::value}}", description: "Set a dynamic variable" },
@@ -124,7 +128,7 @@ function resolveCharacterScopedMacros(
   profile: NonNullable<MacroContext["characterProfiles"]>[number],
 ): string {
   return template
-    .replace(/\{\{char\}\}/gi, profile.name)
+    .replace(/\{\{char(?:Name)?\}\}/gi, profile.name)
     .replace(/\{\{description\}\}/gi, profile.description ?? "")
     .replace(/\{\{personality\}\}/gi, profile.personality ?? "")
     .replace(/\{\{backstory\}\}/gi, profile.backstory ?? "")
@@ -196,6 +200,7 @@ function expandBracketedCharacterBlocks(template: string, ctx: MacroContext): st
  *  - {{isotime}} — ISO timestamp
  *  - {{random}} — random number 0-100
  *  - {{random:X:Y}} — random number X-Y
+ *  - {{random::A::B::C}} — random choice from A, B, C
  *  - {{roll:XdY}} — dice roll (e.g. {{roll:2d6}})
  *  - {{getvar::name}} — read a dynamic variable
  *  - {{setvar::name::value}} — set a variable
@@ -237,9 +242,9 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = result.replace(/\{\{banned\s+"[^"]*"\}\}/gi, "");
 
   // ── Static substitutions ──
-  result = result.replace(/\{\{user\}\}/gi, ctx.user);
+  result = result.replace(/\{\{user(?:Name)?\}\}/gi, ctx.user);
   result = result.replace(/\{\{persona\}\}/gi, personaText);
-  result = result.replace(/\{\{char\}\}/gi, ctx.char);
+  result = result.replace(/\{\{char(?:Name)?\}\}/gi, ctx.char);
   result = result.replace(/\{\{characters\}\}/gi, ctx.characters.join(", "));
   result = result.replace(/\{\{description\}\}/gi, ctx.characterFields?.description ?? "");
   result = result.replace(/\{\{personality\}\}/gi, ctx.characterFields?.personality ?? "");
@@ -264,8 +269,16 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = result.replace(/\{\{isotime\}\}/gi, now.toISOString());
   result = result.replace(/\{\{weekday\}\}/gi, now.toLocaleDateString("en-US", { weekday: "long" }));
 
-  // ── Random numbers ──
+  // ── Random values ──
   result = result.replace(/\{\{random\}\}/gi, () => String(Math.floor(Math.random() * 101)));
+  result = result.replace(/\{\{random::([^}]*)\}\}/gi, (_, body) => {
+    const choices = String(body)
+      .split("::")
+      .map((choice) => choice.trim())
+      .filter(Boolean);
+    if (choices.length === 0) return "";
+    return choices[Math.floor(Math.random() * choices.length)] ?? "";
+  });
   result = result.replace(/\{\{random:(\d+):(\d+)\}\}/gi, (_, min, max) => {
     const lo = parseInt(min, 10);
     const hi = parseInt(max, 10);
@@ -281,26 +294,32 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
     return String(total);
   });
 
-  // ── Variable operations ──
-  result = result.replace(/\{\{getvar::(\w+)\}\}/gi, (_, name) => {
-    return ctx.variables[name] ?? "";
-  });
-  result = result.replace(/\{\{setvar::(\w+)::([^}]*)\}\}/gi, (_, name, val) => {
-    ctx.variables[name] = val;
-    return "";
-  });
-  result = result.replace(/\{\{addvar::(\w+)::([^}]*)\}\}/gi, (_, name, val) => {
-    ctx.variables[name] = (ctx.variables[name] ?? "") + val;
-    return "";
-  });
-  result = result.replace(/\{\{incvar::(\w+)\}\}/gi, (_, name) => {
-    ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) + 1);
-    return "";
-  });
-  result = result.replace(/\{\{decvar::(\w+)\}\}/gi, (_, name) => {
-    ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) - 1);
-    return "";
-  });
+  // ── Variable operations — resolve left-to-right so lorebook entries can set values for later entries. ──
+  result = result.replace(
+    /\{\{(?:(getvar|incvar|decvar)::([\w.-]+)|(setvar|addvar)::([\w.-]+)::([^}]*))\}\}/gi,
+    (_, readOp, readName, writeOp, writeName, val) => {
+      const op = String(readOp ?? writeOp).toLowerCase();
+      const name = String(readName ?? writeName);
+      switch (op) {
+        case "getvar":
+          return ctx.variables[name] ?? "";
+        case "setvar":
+          ctx.variables[name] = val ?? "";
+          return "";
+        case "addvar":
+          ctx.variables[name] = (ctx.variables[name] ?? "") + (val ?? "");
+          return "";
+        case "incvar":
+          ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) + 1);
+          return "";
+        case "decvar":
+          ctx.variables[name] = String((parseInt(ctx.variables[name] ?? "0", 10) || 0) - 1);
+          return "";
+        default:
+          return "";
+      }
+    },
+  );
 
   // ── Case transforms ──
   result = result.replace(/\{\{uppercase\}\}([\s\S]*?)\{\{\/uppercase\}\}/gi, (_, inner) =>

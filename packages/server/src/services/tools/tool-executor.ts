@@ -3,6 +3,9 @@
 // ──────────────────────────────────────────────
 import type { LLMToolCall } from "../llm/base-provider.js";
 import vm from "node:vm";
+import { isCustomToolScriptEnabled, isWebhookLocalUrlsEnabled } from "../../config/runtime-config.js";
+import { safeFetch } from "../../utils/security.js";
+import { logger } from "../../lib/logger.js";
 
 export interface ToolExecutionResult {
   toolCallId: string;
@@ -31,8 +34,17 @@ export interface SpotifyCredentials {
   accessToken: string;
 }
 
+export type MetadataPatch = Record<string, unknown>;
+export type MetadataUpdater = (current: MetadataPatch) => MetadataPatch | Promise<MetadataPatch>;
+export type MetadataPatchInput = MetadataPatch | MetadataUpdater;
+
+const MAX_APPEND_BYTES = 16 * 1024;
+const MAX_TOTAL_SUMMARY_BYTES = 64 * 1024;
+
 export interface ToolExecutionContext {
   gameState?: Record<string, unknown>;
+  chatMeta?: Record<string, unknown>;
+  onUpdateMetadata?: (patch: MetadataPatchInput) => Promise<MetadataPatch>;
   customTools?: CustomToolDef[];
   searchLorebook?: LorebookSearchFn;
   spotify?: SpotifyCredentials;
@@ -99,6 +111,10 @@ async function executeSingleTool(
       return triggerEvent(args);
     case "search_lorebook":
       return searchLorebook(args, context?.searchLorebook);
+    case "read_chat_summary":
+      return readChatSummary(context?.chatMeta);
+    case "append_chat_summary":
+      return appendChatSummary(args, context);
     case "spotify_get_playlists":
       return spotifyGetPlaylists(args, context?.spotify);
     case "spotify_get_playlist_tracks":
@@ -115,7 +131,20 @@ async function executeSingleTool(
       if (custom) return executeCustomTool(custom, args);
       return {
         error: `Unknown tool: ${name}`,
-        available: ["roll_dice", "update_game_state", "set_expression", "trigger_event", "search_lorebook"],
+        available: [
+          "roll_dice",
+          "update_game_state",
+          "set_expression",
+          "trigger_event",
+          "search_lorebook",
+          "read_chat_summary",
+          "append_chat_summary",
+          "spotify_get_playlists",
+          "spotify_get_playlist_tracks",
+          "spotify_search",
+          "spotify_play",
+          "spotify_set_volume",
+        ],
       };
     }
   }
@@ -124,6 +153,7 @@ async function executeSingleTool(
 // ── Custom Tool Execution ──
 
 async function executeCustomTool(tool: CustomToolDef, args: Record<string, unknown>): Promise<unknown> {
+  logger.info("[custom-tools] Executing %s custom tool %s", tool.executionType, tool.name);
   switch (tool.executionType) {
     case "static":
       return { result: tool.staticResult ?? "OK", tool: tool.name, args };
@@ -131,11 +161,17 @@ async function executeCustomTool(tool: CustomToolDef, args: Record<string, unkno
     case "webhook": {
       if (!tool.webhookUrl) return { error: "No webhook URL configured" };
       try {
-        const res = await fetch(tool.webhookUrl, {
+        const allowLocal = isWebhookLocalUrlsEnabled();
+        const res = await safeFetch(tool.webhookUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ tool: tool.name, arguments: args }),
           signal: AbortSignal.timeout(10_000),
+          policy: {
+            allowLocal,
+            allowedProtocols: allowLocal ? ["https:", "http:"] : ["https:"],
+          },
+          maxResponseBytes: 512 * 1024,
         });
         const text = await res.text();
         try {
@@ -149,6 +185,11 @@ async function executeCustomTool(tool: CustomToolDef, args: Record<string, unkno
     }
 
     case "script": {
+      if (!isCustomToolScriptEnabled()) {
+        return {
+          error: "Script custom tools are disabled. Set CUSTOM_TOOL_SCRIPT_ENABLED=true to allow local code execution.",
+        };
+      }
       if (!tool.scriptBody) return { error: "No script body configured" };
       try {
         // Sandboxed execution using vm.runInNewContext
@@ -357,6 +398,82 @@ function setExpression(args: Record<string, unknown>): Record<string, unknown> {
     expression: args.expression,
     display: `🎭 ${args.characterName}: expression → ${args.expression}`,
   };
+}
+
+function readChatSummary(chatMeta?: Record<string, unknown>): Record<string, unknown> {
+  const summary = typeof chatMeta?.summary === "string" ? chatMeta.summary : "";
+  return { summary };
+}
+
+function sanitizePersistedSummaryText(text: string): string {
+  return text
+    .replace(/&(amp|lt|gt);/g, (_match, entity: string) => {
+      switch (entity) {
+        case "amp":
+          return "&";
+        case "lt":
+          return "<";
+        case "gt":
+          return ">";
+        default:
+          return _match;
+      }
+    })
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function utf8ByteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+function trimToUtf8Bytes(text: string, maxBytes: number, fromStart = false): string {
+  if (maxBytes <= 0) return "";
+  if (utf8ByteLength(text) <= maxBytes) return text;
+
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = fromStart ? text.slice(text.length - mid) : text.slice(0, mid);
+    if (utf8ByteLength(candidate) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const trimmed = fromStart ? text.slice(text.length - low) : text.slice(0, low);
+  return fromStart ? trimmed.replace(/^[\uDC00-\uDFFF]/, "") : trimmed.replace(/[\uD800-\uDBFF]$/, "");
+}
+
+async function appendChatSummary(
+  args: Record<string, unknown>,
+  context?: ToolExecutionContext,
+): Promise<Record<string, unknown>> {
+  if (typeof args.text !== "string") {
+    return { error: "append_chat_summary requires non-empty text" };
+  }
+  const text = args.text.trim();
+  if (!text) {
+    return { error: "append_chat_summary requires non-empty text" };
+  }
+  const sanitizedText = trimToUtf8Bytes(sanitizePersistedSummaryText(text), MAX_APPEND_BYTES).trim();
+  if (!sanitizedText) {
+    return { error: "append_chat_summary exceeds per-append size limit" };
+  }
+  if (!context?.onUpdateMetadata) {
+    return { error: "Chat metadata updates are not available in this context" };
+  }
+
+  const updated = await context.onUpdateMetadata((currentMeta) => {
+    const existing =
+      typeof currentMeta.summary === "string" ? sanitizePersistedSummaryText(currentMeta.summary.trim()) : "";
+    const summary = existing ? `${existing}\n\n${sanitizedText}` : sanitizedText;
+    return { summary: trimToUtf8Bytes(summary, MAX_TOTAL_SUMMARY_BYTES, true).trim() };
+  });
+  return { summary: typeof updated.summary === "string" ? updated.summary : sanitizedText };
 }
 
 function triggerEvent(args: Record<string, unknown>): Record<string, unknown> {

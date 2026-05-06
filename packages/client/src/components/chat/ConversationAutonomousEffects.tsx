@@ -46,7 +46,7 @@ export function ConversationAutonomousEffects({
     [characterMap, chatId],
   );
 
-  const { recordUserActivity, recordAssistantActivity } = useAutonomousMessaging(
+  const { recordUserActivity } = useAutonomousMessaging(
     chatId,
     autonomousEnabled,
     exchangesEnabled,
@@ -73,12 +73,10 @@ export function ConversationAutonomousEffects({
       const newest = messages[count - 1];
       if (newest?.role === "user") {
         recordUserActivity();
-      } else if (newest?.role === "assistant") {
-        recordAssistantActivity(newest.characterId ?? undefined);
       }
     }
     prevMsgCountRef.current = count;
-  }, [messages, recordAssistantActivity, recordUserActivity]);
+  }, [messages, recordUserActivity]);
 
   useEffect(() => {
     return () => {

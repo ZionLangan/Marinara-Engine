@@ -30,6 +30,8 @@ interface SpriteOverlayProps {
   fullBodyOnly?: boolean;
   /** Multiplier for sprite size. Game mode passes this for full-body sprites. */
   spriteScale?: number;
+  /** Opacity multiplier for visible sprites. */
+  spriteOpacity?: number;
 }
 
 type Transition = "crossfade" | "bounce" | "shake" | "hop" | "none";
@@ -77,6 +79,7 @@ export function SpriteOverlay({
   onPlacementChange,
   fullBodyOnly = false,
   spriteScale = 1,
+  spriteOpacity = 1,
 }: SpriteOverlayProps) {
   const stageRef = useRef<HTMLDivElement>(null);
 
@@ -98,6 +101,8 @@ export function SpriteOverlay({
 
   // When agent result arrives, prefer it over keyword detection
   useEffect(() => {
+    // Full-body sprites use poses from spriteExpressions (game mode); the facial-expression agent would overwrite them with values like "happy" that don't match any full_* sprite.
+    if (fullBodyOnly) return;
     if (expressionResult?.success && expressionResult.data && expressionResult !== appliedResultRef.current) {
       const data = expressionResult.data as {
         expressions?: Array<{ characterId: string; expression: string; transition?: string }>;
@@ -127,7 +132,7 @@ export function SpriteOverlay({
         return;
       }
     }
-  }, [expressionResult, onExpressionChange]);
+  }, [expressionResult, onExpressionChange, fullBodyOnly]);
 
   // Apply saved per-swipe expressions whenever the prop changes (e.g. user swipes).
   // This runs independently of the agent store so swiping always updates the sprite.
@@ -150,6 +155,8 @@ export function SpriteOverlay({
 
   // Fallback: keyword-based detection when no agent result.
   useEffect(() => {
+    // Same reason as the agent effect: keyword detection produces facial expressions, not full-body poses.
+    if (fullBodyOnly) return;
     if (!messages?.length) return;
     // Only skip fallback when the current agent result has already been applied
     if (expressionResult?.success && expressionResult === appliedResultRef.current) return;
@@ -180,7 +187,7 @@ export function SpriteOverlay({
     }
 
     setStates(newStates);
-  }, [messages, characterIds, expressionResult, spriteExpressions]);
+  }, [messages, characterIds, expressionResult, spriteExpressions, fullBodyOnly]);
 
   const visibleChars = characterIds.slice(0, 3);
   const resolvedPlacements = useMemo(() => {
@@ -214,6 +221,7 @@ export function SpriteOverlay({
           onPlacementChange={onPlacementChange}
           fullBodyOnly={fullBodyOnly}
           spriteScale={spriteScale}
+          spriteOpacity={spriteOpacity}
         />
       ))}
 
@@ -286,6 +294,7 @@ function CharacterSprite({
   onPlacementChange,
   fullBodyOnly = false,
   spriteScale = 1,
+  spriteOpacity = 1,
 }: {
   characterId: string;
   expression: string;
@@ -298,6 +307,7 @@ function CharacterSprite({
   onPlacementChange?: (characterId: string, placement: SpritePlacement) => void;
   fullBodyOnly?: boolean;
   spriteScale?: number;
+  spriteOpacity?: number;
 }) {
   const { data: sprites } = useCharacterSprites(characterId);
   const prevExpressionRef = useRef(expression);
@@ -345,9 +355,10 @@ function CharacterSprite({
         ? "max-h-[min(74vh,calc(55vh*var(--game-sprite-scale)))] max-w-[min(86vw,calc(60vw*var(--game-sprite-scale)))] md:max-h-[min(76vh,calc(52vh*var(--game-sprite-scale)))] md:max-w-[min(46vw,calc(32vw*var(--game-sprite-scale)))]"
         : "max-h-[min(82vh,calc(65vh*var(--game-sprite-scale)))] max-w-[min(92vw,calc(80vw*var(--game-sprite-scale)))] md:max-h-[min(78vh,calc(60vh*var(--game-sprite-scale)))] md:max-w-[min(58vw,calc(38vw*var(--game-sprite-scale)))]";
   const spriteScaleStyle = useMemo<CSSProperties>(
-    () => ({ "--game-sprite-scale": Math.max(0.75, Math.min(1.75, spriteScale)) }) as CSSProperties,
+    () => ({ "--game-sprite-scale": Math.max(0.5, Math.min(1.75, spriteScale)) }) as CSSProperties,
     [spriteScale],
   );
+  const resolvedSpriteOpacity = Math.max(0.15, Math.min(1, spriteOpacity));
 
   useEffect(() => {
     currentPlacementRef.current = currentPlacement;
@@ -438,19 +449,21 @@ function CharacterSprite({
         </div>
       )}
 
-      <AnimatePresence mode="wait">
-        <motion.img
-          key={`${characterId}-${expression}`}
-          src={spriteUrl}
-          alt={`${expression} sprite`}
-          className={`${sizeClass} w-auto object-contain drop-shadow-[0_0_20px_rgba(0,0,0,0.5)] ${editing ? "cursor-grab active:cursor-grabbing" : ""}`}
-          style={spriteScaleStyle}
-          draggable={false}
-          initial={variant.initial}
-          animate={variant.animate}
-          exit={variant.exit}
-        />
-      </AnimatePresence>
+      <div style={{ opacity: resolvedSpriteOpacity }}>
+        <AnimatePresence mode="wait">
+          <motion.img
+            key={`${characterId}-${expression}`}
+            src={spriteUrl}
+            alt={`${expression} sprite`}
+            className={`${sizeClass} w-auto object-contain drop-shadow-[0_0_20px_rgba(0,0,0,0.5)] ${editing ? "cursor-grab active:cursor-grabbing" : ""}`}
+            style={spriteScaleStyle}
+            draggable={false}
+            initial={variant.initial}
+            animate={variant.animate}
+            exit={variant.exit}
+          />
+        </AnimatePresence>
+      </div>
     </div>
   );
 }

@@ -5,13 +5,37 @@
 // All assets are CC0 — see CREDITS.md in the bundle.
 // ──────────────────────────────────────────────
 import { logger } from "../lib/logger.js";
-import { existsSync, mkdirSync, readdirSync, copyFileSync, statSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, readdirSync, copyFileSync, statSync, writeFileSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { GAME_ASSETS_DIR } from "../services/game/asset-manifest.service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_DIR = join(__dirname, "..", "assets", "default-game-assets");
+const SEED_MARKER = join(GAME_ASSETS_DIR, ".default-assets-seeded.sha256");
+
+function hashDirRecursive(src: string, relativeRoot = ""): string {
+  const hash = createHash("sha256");
+  if (!existsSync(src)) return "";
+
+  const entries = readdirSync(src).sort((a, b) => a.localeCompare(b));
+  for (const entry of entries) {
+    if (entry.startsWith(".")) continue;
+    const srcPath = join(src, entry);
+    const relativePath = relativeRoot ? `${relativeRoot}/${entry}` : entry;
+    const stat = statSync(srcPath);
+    if (stat.isDirectory()) {
+      hash.update(relativePath);
+      hash.update(hashDirRecursive(srcPath, relativePath));
+      continue;
+    }
+    hash.update(relativePath);
+    hash.update(readFileSync(srcPath));
+  }
+
+  return hash.digest("hex");
+}
 
 /**
  * Recursively copy a source directory into a destination,
@@ -50,11 +74,16 @@ export async function seedDefaultGameAssets(): Promise<void> {
     return;
   }
 
-  // copyDirRecursive is idempotent — it skips files that already exist at the
-  // destination. Running on every boot means upgrading users automatically
-  // receive any new bundled assets (e.g. new ambient tracks shipped in a
-  // point release) without overwriting their own additions.
+  const bundleHash = hashDirRecursive(BUNDLED_DIR);
+  const existingHash = existsSync(SEED_MARKER) ? readFileSync(SEED_MARKER, "utf-8").trim() : "";
+  if (bundleHash && existingHash === bundleHash) {
+    return;
+  }
+
+  // Seed whenever the bundled asset set changes, while still skipping files
+  // the user already has at the destination.
   const copied = copyDirRecursive(BUNDLED_DIR, GAME_ASSETS_DIR);
+  writeFileSync(SEED_MARKER, `${bundleHash}\n`, "utf-8");
 
   if (copied > 0) {
     logger.info(`[seed] Installed ${copied} default game asset${copied > 1 ? "s" : ""} (music, ambient, SFX, sprites)`);

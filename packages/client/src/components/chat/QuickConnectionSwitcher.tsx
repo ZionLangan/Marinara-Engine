@@ -21,9 +21,7 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
   const activeConnectionId = (chat as unknown as Record<string, unknown>)?.connectionId as string | null;
   const isRandom = activeConnectionId === "random";
 
-  const sorted = (
-    (connections ?? []) as Array<{ id: string; name: string; useForRandom?: string }>
-  )
+  const sorted = ((connections ?? []) as Array<{ id: string; name: string; useForRandom?: string }>)
     .slice()
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 

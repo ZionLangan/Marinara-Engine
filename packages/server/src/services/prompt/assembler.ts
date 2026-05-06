@@ -20,6 +20,7 @@ import { wrapContent, wrapGroup } from "./format-engine.js";
 import { expandMarker, type MarkerContext } from "./marker-expander.js";
 import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
+import { buildPromptMacroContext, collectCharacterDepthPromptEntries } from "./macro-context.js";
 
 // ═══════════════════════════════════════════════
 //  Public Interface
@@ -108,6 +109,8 @@ export interface AssemblerInput {
   chatEmbedding?: number[] | null;
   /** Per-chat ephemeral state overrides for lorebook entries (from chat metadata). */
   entryStateOverrides?: Record<string, { ephemeral?: number | null; enabled?: boolean }>;
+  /** Generation trigger labels used by per-entry lorebook include/exclude filters. */
+  generationTriggers?: string[];
   /** When set, replaces individual character scenario fields with this group scenario. */
   groupScenarioOverrideText?: string | null;
 }
@@ -181,23 +184,17 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   }
 
   // Build macro context (character names and primary card fields resolved from IDs)
-  const characterMacroData = await resolveCharacterMacroData(input.db, input.characterIds);
-  const charNames = characterMacroData.names;
-  const macroCtx: MacroContext = {
-    user: input.personaName || "User",
-    char: charNames[0] || "Character",
-    characters: charNames,
-    characterProfiles: characterMacroData.profiles,
+  const macroCtx = await buildPromptMacroContext({
+    db: input.db,
+    characterIds: input.characterIds,
+    personaName: input.personaName,
+    personaDescription: input.personaDescription,
+    personaFields: input.personaFields,
     variables: variableValues,
-    characterFields: {
-      ...(characterMacroData.primaryFields ?? {}),
-      ...(input.groupScenarioOverrideText ? { scenario: input.groupScenarioOverrideText } : {}),
-    },
-    personaFields: {
-      description: input.personaDescription,
-      ...(input.personaFields ?? {}),
-    },
-  };
+    groupScenarioOverrideText: input.groupScenarioOverrideText,
+    lastInput: [...input.chatMessages].reverse().find((message) => message.role === "user")?.content,
+    chatId: input.chatId,
+  });
 
   // Resolve macros inside variable values themselves (e.g. {{user}} in a choice value)
   for (const key of Object.keys(variableValues)) {
@@ -222,6 +219,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     activeLorebookIds: input.activeLorebookIds ?? [],
     chatEmbedding: input.chatEmbedding ?? null,
     entryStateOverrides: input.entryStateOverrides,
+    generationTriggers: input.generationTriggers ?? ["chat"],
     groupScenarioOverrideText: input.groupScenarioOverrideText ?? null,
   };
 
@@ -366,6 +364,11 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
         content: resolveMacros(entry.content, macroCtx),
       })),
     );
+  }
+
+  const characterDepthEntries = await collectCharacterDepthPromptEntries(input.db, input.characterIds, macroCtx);
+  if (characterDepthEntries.length > 0) {
+    allDepthEntries.push(characterDepthEntries);
   }
 
   const combinedDepthEntries = allDepthEntries.flat();
@@ -551,62 +554,6 @@ function buildGroupMessages(
 // ═══════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════
-
-async function resolveCharacterMacroData(
-  db: DB,
-  characterIds: string[],
-): Promise<{
-  names: string[];
-  profiles: NonNullable<MacroContext["characterProfiles"]>;
-  primaryFields?: NonNullable<MacroContext["characterFields"]>;
-}> {
-  if (characterIds.length === 0) return { names: [], profiles: [] };
-
-  const { createCharactersStorage } = await import("../storage/characters.storage.js");
-  const chars = createCharactersStorage(db);
-  const names: string[] = [];
-  const profiles: NonNullable<MacroContext["characterProfiles"]> = [];
-  let primaryFields: NonNullable<MacroContext["characterFields"]> | undefined;
-
-  for (const id of characterIds) {
-    const row = await chars.getById(id);
-    if (row) {
-      const data = JSON.parse(row.data) as {
-        name?: string;
-        description?: string;
-        personality?: string;
-        scenario?: string;
-        mes_example?: string;
-        extensions?: {
-          backstory?: string;
-          appearance?: string;
-        };
-      };
-      if (data.name) names.push(data.name);
-      profiles.push({
-        name: data.name ?? "Character",
-        description: data.description ?? "",
-        personality: data.personality ?? "",
-        backstory: data.extensions?.backstory ?? "",
-        appearance: data.extensions?.appearance ?? "",
-        scenario: data.scenario ?? "",
-        example: data.mes_example ?? "",
-      });
-      if (!primaryFields) {
-        primaryFields = {
-          description: data.description ?? "",
-          personality: data.personality ?? "",
-          backstory: data.extensions?.backstory ?? "",
-          appearance: data.extensions?.appearance ?? "",
-          scenario: data.scenario ?? "",
-          example: data.mes_example ?? "",
-        };
-      }
-    }
-  }
-
-  return { names, profiles, primaryFields };
-}
 
 /**
  * Enforce strict role formatting:
