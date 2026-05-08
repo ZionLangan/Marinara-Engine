@@ -125,14 +125,14 @@ export function CyoaChoices({ messages }: Props) {
     if (!activeChatId || isStreaming || isEditing || isRerolling) return;
     setIsRerolling(true);
     try {
-      // Re-runs ONLY the CYOA agent with fresh context (latest messages + last
-      // assistant's extras). The retry route persists the new choices to the
-      // message's extra and the SSE handler swaps them into the store.
-      await retryAgents(activeChatId, ["cyoa"]);
+      // Use cyoa-skills when the current choices include skill checks so the
+      // re-roll targets the same agent type that produced the original set.
+      const agentType = choices.some((c) => c.skillCheck != null) ? "cyoa-skills" : "cyoa";
+      await retryAgents(activeChatId, [agentType]);
     } finally {
       setIsRerolling(false);
     }
-  }, [activeChatId, isStreaming, isEditing, isRerolling, retryAgents]);
+  }, [activeChatId, choices, isStreaming, isEditing, isRerolling, retryAgents]);
 
   const handleStartEdit = useCallback(() => {
     setDraftChoices(choices.map((choice) => ({ ...choice })));
@@ -304,22 +304,6 @@ export function CyoaChoices({ messages }: Props) {
               </button>
             );
           })}
-          {choices.map((choice, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => handleChoice(choice)}
-              disabled={isStreaming || isRerolling}
-              className="group relative rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-4 py-2.5 text-left backdrop-blur-md transition-all hover:border-purple-400/40 hover:bg-purple-500/10 hover:shadow-lg hover:shadow-purple-500/5 active:scale-[0.98] disabled:opacity-50 dark:border-white/10 dark:bg-black/50"
-            >
-              <span className="block text-[0.6875rem] font-semibold text-purple-700 group-hover:text-purple-600 dark:text-purple-300/90 dark:group-hover:text-purple-200">
-                {choice.label}
-              </span>
-              <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-[var(--foreground)]/60 group-hover:text-[var(--foreground)]/80 dark:text-white/50 dark:group-hover:text-white/70">
-                {choice.text}
-              </span>
-            </button>
-          ))}
         </div>
       )}
     </div>

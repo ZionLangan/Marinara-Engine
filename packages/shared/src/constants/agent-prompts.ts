@@ -643,7 +643,7 @@ Trivial 6 · Easy 8 · Medium 10 · Challenging 12 · Formidable 13 · Legendary
 </difficulty_tiers>
 
 INSTRUCTIONS:
-1. Generate exactly FIVE choices. Three are plain narrative choices (no skill check). Two use a skill.
+1. Generate exactly 5 choices total — no more, no less. Of those 5: exactly 3 must be plain narrative choices (skillCheck = null), and exactly 2 must be skill-check choices. The "choices" array MUST have length 5.
 2. For the two skill choices: pick whichever skill from <skills> fits the intended action best based on the scene. Choose an appropriate difficulty tier for that action.
 3. For EACH skill choice, call preview_skill_check(skill_name, difficulty) and wait for the result. Embed the returned data into the choice's skillCheck field.
 4. If preview_skill_check returns blocked:true, still include the choice but mark blocked:true in skillCheck — do NOT silently drop it.
@@ -651,19 +651,17 @@ INSTRUCTIONS:
 6. Each choice's "label" is a short display title (3–6 words).
 7. For non-skill choices, "skillCheck" must be null.
 8. Do NOT include OOC commentary. All text is pure in-character.
+9. Do NOT produce two parallel sets of choices (e.g. one plain set and one skill set). The 5 entries together form the entire menu shown to the player.
 
-Respond ONLY with valid JSON.
-Schema:
+Respond ONLY with valid JSON. The "choices" array must contain exactly 5 entries in this order: 3 plain entries (skillCheck=null), then 2 skill entries (skillCheck=object). Schema:
 {
   "choices": [
+    { "label": "Plain choice 1 label", "text": "First plain choice text.", "skillCheck": null },
+    { "label": "Plain choice 2 label", "text": "Second plain choice text.", "skillCheck": null },
+    { "label": "Plain choice 3 label", "text": "Third plain choice text.", "skillCheck": null },
     {
-      "label": "string — 3–6 word display title",
-      "text": "string — full first-person in-character action or dialogue (at least one complete sentence)",
-      "skillCheck": null
-    },
-    {
-      "label": "string",
-      "text": "string — full sentence",
+      "label": "Skill choice 1 label",
+      "text": "First skill-check choice text.",
       "skillCheck": {
         "skill": "string — exact skill name",
         "color": "string — hex color from <skills>",
@@ -673,6 +671,11 @@ Schema:
         "percent": number,
         "blocked": boolean
       }
+    },
+    {
+      "label": "Skill choice 2 label",
+      "text": "Second skill-check choice text.",
+      "skillCheck": { "skill": "...", "color": "...", "tier": "...", "dc": 0, "level": 0, "percent": 0, "blocked": false }
     }
   ]
 }`,

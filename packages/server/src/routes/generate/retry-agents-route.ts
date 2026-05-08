@@ -1094,7 +1094,9 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
           conns,
           agentsStore,
         });
-        const cyoaAgentWillRun = resolvedAgents.some((e) => e.resolved.type === "cyoa");
+        const cyoaAgentWillRun = resolvedAgents.some(
+          (e) => e.resolved.type === "cyoa" || e.resolved.type === "cyoa-skills",
+        );
         const agentContext = await buildRetryAgentContext({
           cyoaAgentWillRun,
           chatId,
@@ -1115,7 +1117,18 @@ export async function registerRetryAgentsRoute(app: FastifyInstance) {
           sendSseEvent(reply, { type: "agent_warning", data: warning });
         }
         const lorebookKeeperAgent = resolvedAgents.find((entry) => entry.resolved.type === "lorebook-keeper") ?? null;
-        const nonLorebookAgents = resolvedAgents.filter((entry) => entry.resolved.type !== "lorebook-keeper");
+        // Mutual exclusion mirrors the main generate route: if both cyoa and cyoa-skills
+        // resolve, only cyoa-skills runs so the player never sees two parallel sets of choices.
+        const hasCyoaSkillsRetry = resolvedAgents.some((entry) => entry.resolved.type === "cyoa-skills");
+        const hasCyoaRetry = resolvedAgents.some((entry) => entry.resolved.type === "cyoa");
+        if (hasCyoaSkillsRetry && hasCyoaRetry) {
+          logger.warn("[retry-agents] Both cyoa and cyoa-skills resolved — running cyoa-skills only");
+        }
+        const nonLorebookAgents = resolvedAgents.filter(
+          (entry) =>
+            entry.resolved.type !== "lorebook-keeper" &&
+            !(hasCyoaSkillsRetry && entry.resolved.type === "cyoa"),
+        );
         if (cyoaAgentWillRun) {
           logger.info(
             "[retry-agents] CYOA re-roll chatId=%s assistantMessageId=%s",
