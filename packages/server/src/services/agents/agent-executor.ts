@@ -13,6 +13,11 @@ import {
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger } from "../../lib/logger.js";
 
+const MAX_AGENT_CONTEXT_MESSAGES = 200;
+const EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES = 2;
+const EXPRESSION_AGENT_CONTEXT_CHAR_LIMIT = 1200;
+const EXPRESSION_AGENT_RESPONSE_CHAR_LIMIT = 6000;
+
 /** Strip HTML/XML-style tags (e.g. <div style="..."> <br> <speaker>) from text to save tokens. */
 function stripHtmlTags(text: string): string {
   return text
@@ -36,6 +41,13 @@ export interface AgentExecConfig {
 export interface AgentToolContext {
   tools: LLMToolDefinition[];
   executeToolCall: (call: LLMToolCall) => Promise<string>;
+}
+
+export function normalizeAgentContextSize(value: unknown, fallback = DEFAULT_AGENT_CONTEXT_SIZE): number {
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : fallback;
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.max(1, Math.min(MAX_AGENT_CONTEXT_MESSAGES, Math.trunc(parsed)));
 }
 
 function redactSensitiveValue(value: unknown): unknown {
@@ -102,32 +114,15 @@ export async function executeAgent(
   const startTime = Date.now();
 
   try {
-    // Build the agent's system prompt with <role> + <lore> + <agents> + extras
     const template = config.promptTemplate || getDefaultAgentPrompt(config.type);
     if (!template) {
       return makeError(config, "No prompt template configured", startTime);
     }
 
-    const systemParts: string[] = [];
-    systemParts.push(`<role>`);
-    systemParts.push(`You are a specialized agent. Fulfill your task and return the requested output.`);
-    systemParts.push(`</role>`);
-    systemParts.push(``);
-    systemParts.push(buildLoreBlock(context));
-    systemParts.push(``);
-    systemParts.push(`<agents>`);
-    systemParts.push(`Fulfill the requested task here and return the output in the format specified:`);
-    systemParts.push(template);
-    systemParts.push(`</agents>`);
-    const extras = buildAgentExtras(context, [config.type]);
-    if (extras) {
-      systemParts.push(``);
-      systemParts.push(extras);
-    }
-
-    // Build multi-turn message array for this agent (sliced to its own contextSize)
-    const agentContextSize = (config.settings.contextSize as number) || DEFAULT_AGENT_CONTEXT_SIZE;
-    const messages = buildAgentMessages(systemParts.join("\n"), context, config.type, agentContextSize);
+    const messages =
+      config.type === "expression"
+        ? buildExpressionAgentMessages(template, context)
+        : buildStandardAgentMessages(config, template, context);
 
     // Agents use lower temperature for reliability
     const temperature = (config.settings.temperature as number) ?? 0.3;
@@ -320,6 +315,29 @@ export async function executeAgentBatch(
   model: string,
 ): Promise<AgentResult[]> {
   if (configs.length === 0) return [];
+  const isolatedConfigs = configs.filter(shouldRunAgentIndividually);
+  if (isolatedConfigs.length > 0 && isolatedConfigs.length < configs.length) {
+    logger.info(
+      "[agent-batch] Running %d compact agent(s) outside batch: [%s]",
+      isolatedConfigs.length,
+      isolatedConfigs.map((c) => c.type).join(", "),
+    );
+    const batchedConfigs = configs.filter((config) => !shouldRunAgentIndividually(config));
+    const [batchedResults, isolatedSettled] = await Promise.all([
+      executeAgentBatch(batchedConfigs, context, provider, model),
+      Promise.allSettled(isolatedConfigs.map((config) => executeAgent(config, context, provider, model))),
+    ]);
+    const isolatedResults = isolatedSettled.map((entry, index) =>
+      entry.status === "fulfilled"
+        ? entry.value
+        : makeError(
+            isolatedConfigs[index]!,
+            entry.reason instanceof Error ? entry.reason.message : "Agent execution failed",
+            Date.now(),
+          ),
+    );
+    return [...batchedResults, ...isolatedResults];
+  }
   if (configs.length === 1) {
     logger.info(`[agent-batch] Only 1 agent (${configs[0]!.type}), running individually`);
     return [await executeAgent(configs[0]!, context, provider, model)];
@@ -333,9 +351,7 @@ export async function executeAgentBatch(
     // Build merged system prompt (includes lore + agent extras)
     const systemPrompt = buildBatchSystemPrompt(configs, context);
     // Batch uses the max contextSize among its members
-    const batchContextSize = Math.max(
-      ...configs.map((c) => (c.settings.contextSize as number) || DEFAULT_AGENT_CONTEXT_SIZE),
-    );
+    const batchContextSize = Math.max(...configs.map((c) => normalizeAgentContextSize(c.settings.contextSize)));
     const messages = buildAgentMessages(systemPrompt, context, "__batch__", batchContextSize);
 
     // Each agent reserves its own configured output budget. The context fitter
@@ -574,6 +590,104 @@ function makeError(config: AgentExecConfig, error: string, startTime: number): A
   };
 }
 
+function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type">): boolean {
+  return config.type === "expression";
+}
+
+function buildStandardAgentMessages(config: AgentExecConfig, template: string, context: AgentContext): ChatMessage[] {
+  // Build the agent's system prompt with <role> + <lore> + <agents> + extras
+  const systemParts: string[] = [];
+  systemParts.push(`<role>`);
+  systemParts.push(`You are a specialized agent. Fulfill your task and return the requested output.`);
+  systemParts.push(`</role>`);
+  systemParts.push(``);
+  systemParts.push(buildLoreBlock(context));
+  systemParts.push(``);
+  systemParts.push(`<agents>`);
+  systemParts.push(`Fulfill the requested task here and return the output in the format specified:`);
+  systemParts.push(template);
+  systemParts.push(`</agents>`);
+  const extras = buildAgentExtras(context, [config.type]);
+  if (extras) {
+    systemParts.push(``);
+    systemParts.push(extras);
+  }
+
+  // Build multi-turn message array for this agent (sliced to its own contextSize)
+  const agentContextSize = normalizeAgentContextSize(config.settings.contextSize);
+  return buildAgentMessages(systemParts.join("\n"), context, config.type, agentContextSize);
+}
+
+function truncateAgentText(text: string, maxChars: number): string {
+  const cleaned = stripHtmlTags(text);
+  const chars = Array.from(cleaned);
+  if (chars.length <= maxChars) return cleaned;
+
+  const marker = "\n\n[Trimmed to keep this agent request compact]\n\n";
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.floor(available * 0.4);
+  const tail = available - head;
+  return chars.slice(0, head).join("") + marker + chars.slice(-tail).join("");
+}
+
+function findLatestAssistantMessage(context: AgentContext): { index: number; content: string } | null {
+  for (let index = context.recentMessages.length - 1; index >= 0; index--) {
+    const message = context.recentMessages[index]!;
+    if (message.role === "assistant" && message.content.trim()) {
+      return { index, content: message.content };
+    }
+  }
+  return null;
+}
+
+function buildExpressionAgentMessages(template: string, context: AgentContext): ChatMessage[] {
+  const systemParts: string[] = [];
+  systemParts.push(`<role>`);
+  systemParts.push(`You are a specialized expression-selection agent. Keep the request compact and return only JSON.`);
+  systemParts.push(`</role>`);
+  systemParts.push(``);
+  systemParts.push(`<agents>`);
+  systemParts.push(`Fulfill the requested task here and return the output in the format specified:`);
+  systemParts.push(template);
+  systemParts.push(`</agents>`);
+
+  const spritesBlock = buildAvailableSpritesBlock(context);
+  if (spritesBlock) {
+    systemParts.push(``);
+    systemParts.push(spritesBlock);
+  }
+
+  const latestAssistant = findLatestAssistantMessage(context);
+  const responseText = context.mainResponse?.trim() || latestAssistant?.content || "";
+  const contextEndIndex = context.mainResponse?.trim() ? context.recentMessages.length : (latestAssistant?.index ?? 0);
+  const recentContext = context.recentMessages
+    .slice(0, contextEndIndex)
+    .slice(-EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES)
+    .filter((message) => message.content.trim());
+
+  const userParts: string[] = [];
+  if (recentContext.length > 0) {
+    userParts.push(`<recent_context>`);
+    for (const message of recentContext) {
+      const role = message.role === "assistant" ? "assistant" : "user";
+      userParts.push(`[${role}] ${truncateAgentText(message.content, EXPRESSION_AGENT_CONTEXT_CHAR_LIMIT)}`);
+    }
+    userParts.push(`</recent_context>`);
+    userParts.push(``);
+  }
+
+  userParts.push(`<assistant_response>`);
+  userParts.push(truncateAgentText(responseText, EXPRESSION_AGENT_RESPONSE_CHAR_LIMIT));
+  userParts.push(`</assistant_response>`);
+  userParts.push(``);
+  userParts.push(`Now return the requested format.`);
+
+  return [
+    { role: "system", content: systemParts.join("\n"), contextKind: "prompt" },
+    { role: "user", content: userParts.join("\n"), contextKind: "history" },
+  ];
+}
+
 /** Extract a useful message from fetch/network errors (preserves err.cause). */
 export function extractErrorMessage(err: unknown, fallback = "Agent execution failed"): string {
   if (!(err instanceof Error)) return fallback;
@@ -614,6 +728,12 @@ function buildAgentMessages(
   // ── 2. Chat history as proper multi-turn messages ──
   // Slice to this agent's own contextSize (the shared pool may be larger)
   const recent = context.recentMessages.slice(-contextSize);
+  // Text-output agents (director, prose-guardian) evaluate pacing/writing
+  // quality and do NOT need raw committed tracker JSON. Including it makes
+  // the input look like `[assistant] roleplay + <committed_tracker_state>{...}`
+  // — a pattern small/fine-tuned models mimic into their response, leaking
+  // roleplay and tracker JSON that gets injected into the main prompt.
+  const skipTrackerAppend = isTextOutputAgentType(agentType);
   if (recent.length > 0) {
     // Only attach committed tracker state to the last 3 assistant messages to save tokens
     const assistantIndices: number[] = [];
@@ -629,8 +749,9 @@ function buildAgentMessages(
       const role: "user" | "assistant" = msg.role === "assistant" ? "assistant" : "user";
       let content = stripHtmlTags(msg.content).slice(0, 2000);
 
-      // Append committed tracker data only to the last 3 assistant messages
-      if (msg.gameState && trackerEligible.has(msgIdx)) {
+      // Append committed tracker data only to the last 3 assistant messages,
+      // and only for agents whose output is structured (not text agents — see above).
+      if (!skipTrackerAppend && msg.gameState && trackerEligible.has(msgIdx)) {
         const gs = msg.gameState;
         const trackerSummary: Record<string, unknown> = {};
         if (gs.date || gs.time || gs.location || gs.weather || gs.temperature) {
@@ -746,6 +867,22 @@ function buildLoreBlock(context: AgentContext): string {
   return parts.join("\n");
 }
 
+function buildAvailableSpritesBlock(context: AgentContext): string {
+  if (!context.memory._availableSprites) return "";
+
+  const sprites = context.memory._availableSprites as Array<{
+    characterId: string;
+    characterName: string;
+    expressions: string[];
+  }>;
+  const parts: string[] = [`<available_sprites>`];
+  for (const char of sprites) {
+    parts.push(`${char.characterName} (${char.characterId}): ${char.expressions.join(", ")}`);
+  }
+  parts.push(`</available_sprites>`);
+  return parts.join("\n");
+}
+
 /**
  * Build agent-specific context blocks (sprites, backgrounds, source material, etc.)
  * that go into the system message after lore.
@@ -789,17 +926,9 @@ function buildAgentExtras(context: AgentContext, agentTypes: string[] = []): str
     parts.push(`</current_game_state>`);
   }
 
-  if (context.memory._availableSprites) {
-    const sprites = context.memory._availableSprites as Array<{
-      characterId: string;
-      characterName: string;
-      expressions: string[];
-    }>;
-    parts.push(`<available_sprites>`);
-    for (const char of sprites) {
-      parts.push(`${char.characterName} (${char.characterId}): ${char.expressions.join(", ")}`);
-    }
-    parts.push(`</available_sprites>`);
+  if (agentTypes.includes("expression")) {
+    const availableSpritesBlock = buildAvailableSpritesBlock(context);
+    if (availableSpritesBlock) parts.push(availableSpritesBlock);
   }
 
   if (context.memory._availableBackgrounds) {
@@ -996,6 +1125,20 @@ function agentResponseIsJson(config: Pick<AgentExecConfig, "type" | "settings">)
   return JSON_AGENTS.has(config.type) || !TEXT_RESULT_TYPES.has(resultType);
 }
 
+/**
+ * Whether a built-in agent type's primary output is plain text (director note,
+ * writing directives, etc.) rather than structured JSON. Used to suppress
+ * inputs/outputs that text agents may pattern-mimic into their response.
+ *
+ * Returns false for unknown types (custom agents, "__batch__"): the safe
+ * default keeps full context; tracker-leak sanitization runs on the output side.
+ */
+function isTextOutputAgentType(agentType: string): boolean {
+  const resultType = AGENT_RESULT_TYPE_MAP[agentType];
+  if (!resultType) return false;
+  return TEXT_RESULT_TYPES.has(resultType);
+}
+
 /** Agents that return structured JSON. */
 const JSON_AGENTS = new Set([
   "world-state",
@@ -1022,6 +1165,40 @@ const JSON_AGENTS = new Set([
 ]);
 
 /**
+ * Strip leaked synthetic tags from a text agent's response and, for the
+ * Narrative Director, extract only the canonical "[Director's note: ...]"
+ * payload its prompt mandates.
+ *
+ * Background: when a text agent (director, prose-guardian) is shown chat
+ * history that ends in `<committed_tracker_state>{...}</committed_tracker_state>`,
+ * smaller models will continue the pattern and emit roleplay + tracker JSON
+ * before/around their intended directive. That leaked content gets injected
+ * into the main prompt as a system block, then converted to a user message
+ * by `prepareProviderMessages`, causing the main AI to respond to the leak.
+ */
+function sanitizeTextAgentResponse(agentType: string, text: string): string {
+  const cleaned = text
+    .replace(/<committed_tracker_state>[\s\S]*?<\/committed_tracker_state>/gi, "")
+    .replace(/<assistant_response>[\s\S]*?<\/assistant_response>/gi, "")
+    .trim();
+
+  // Director output is locked to "[Director's note: ...]" by its prompt.
+  // Anything outside that bracket is leakage — extract the last note (most
+  // likely the model's "final" intent) and discard the rest. If no bracketed
+  // note is present at all, the response is fully off-format; drop it so the
+  // pipeline injects nothing rather than hallucinated roleplay.
+  if (agentType === "director") {
+    const noteMatches = cleaned.match(/\[Director(?:'|’)s note:[^\]]*\]/gi);
+    if (noteMatches && noteMatches.length > 0) {
+      return noteMatches[noteMatches.length - 1]!.trim();
+    }
+    return "";
+  }
+
+  return cleaned;
+}
+
+/**
  * Parse the raw LLM response into a typed result.
  */
 function parseAgentResponse(
@@ -1043,8 +1220,9 @@ function parseAgentResponse(
     }
   }
 
-  // Text-based agents (prose-guardian, director)
-  return { type: resultType, data: { text: responseText } };
+  // Text-based agents (prose-guardian, director). Sanitize before injection so
+  // leaked tracker/roleplay content can't reach the main prompt.
+  return { type: resultType, data: { text: sanitizeTextAgentResponse(config.type, responseText) } };
 }
 
 /** Extract JSON from a response that may contain markdown fences. */

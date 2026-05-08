@@ -10,9 +10,12 @@ export type SimpleMessage = { role: "system" | "user" | "assistant"; content: st
 export type StoredGenerationParameters = Partial<GenerationParameters>;
 export type PromptAttachment = {
   type?: string | null;
+  url?: string | null;
   data?: string | null;
   filename?: string | null;
   name?: string | null;
+  prompt?: string | null;
+  galleryId?: string | null;
 };
 
 const TEXT_ATTACHMENT_CHAR_LIMIT = 60_000;
@@ -164,6 +167,20 @@ export function resolveBaseUrl(connection: { baseUrl: string | null; provider: s
   if (connection.provider === "claude_subscription") return "claude-agent-sdk://local";
   const providerDef = PROVIDERS[connection.provider as keyof typeof PROVIDERS];
   return providerDef?.defaultBaseUrl ?? "";
+}
+
+export function shouldEnableAgentsForGeneration({
+  chatEnableAgents,
+  chatMode,
+  impersonate,
+  impersonateBlockAgents,
+}: {
+  chatEnableAgents: boolean;
+  chatMode: string;
+  impersonate: boolean;
+  impersonateBlockAgents: boolean;
+}): boolean {
+  return chatEnableAgents && chatMode !== "conversation" && !(impersonate && impersonateBlockAgents);
 }
 
 /** Parse connection/chat stored generation parameters without injecting schema defaults. */

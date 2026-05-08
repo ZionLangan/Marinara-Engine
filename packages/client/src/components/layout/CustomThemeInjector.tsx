@@ -2,9 +2,10 @@
 // CustomThemeInjector: Injects active custom theme
 // CSS and enabled extension CSS/JS into the DOM
 // ──────────────────────────────────────────────
-import { useEffect } from "react";
-import { useUIStore } from "../../stores/ui.store";
+import { useEffect, useMemo } from "react";
 import { useThemes } from "../../hooks/use-themes";
+import { useExtensions } from "../../hooks/use-extensions";
+import { useUIStore } from "../../stores/ui.store";
 
 type ExtensionGlobal = typeof globalThis & {
   __marinaraExtensionApis?: Map<string, unknown>;
@@ -31,14 +32,26 @@ function buildExtensionModuleSource(apiKey: string, extensionName: string, js: s
     `const executeExtension = function(marinara) {`,
     js,
     `};`,
-    `executeExtension(marinara);`,
+    // Bind `this` to globalThis so classic-script-style extensions that rely on
+    // `this === window` (e.g. for top-level `this.foo = bar` global assignment)
+    // still work under module strict mode.
+    `executeExtension.call(globalThis, marinara);`,
     `export {};`,
     `//# sourceURL=marinara-extension-${sourceName}.js`,
   ].join("\n");
 }
 
 export function CustomThemeInjector() {
-  const installedExtensions = useUIStore((s) => s.installedExtensions);
+  const { data: serverExtensions = [] } = useExtensions();
+  const legacyExtensions = useUIStore((s) => s.installedExtensions);
+  const hasMigrated = useUIStore((s) => s.hasMigratedExtensionsToServer);
+  // Until the legacy localStorage list has been migrated, fall back to it so
+  // users with pre-PR extensions don't see them vanish during the brief window
+  // between app boot and `useLegacyExtensionMigration` finishing.
+  const installedExtensions = useMemo(
+    () => (hasMigrated ? serverExtensions : legacyExtensions),
+    [hasMigrated, serverExtensions, legacyExtensions],
+  );
   const { data: syncedThemes = [] } = useThemes();
   const activeTheme = syncedThemes.find((theme) => theme.isActive) ?? null;
 
@@ -160,8 +173,27 @@ export function CustomThemeInjector() {
           },
 
           // Fetch from Marinara API
+          // Deny extensions from calling sensitive endpoints. Without this,
+          // a malicious extension could `apiFetch("/extensions", { method: "POST", ... })`
+          // to re-install itself after the user deletes it, or hit `/admin/*`
+          // privileged routes. The denylist runs on the *canonical* pathname
+          // produced by the WHATWG URL parser, so `%2e%2e/admin` and other
+          // dot-segment / encoded-traversal payloads can't sneak past.
           apiFetch: async (path: string, options?: RequestInit) => {
-            const res = await fetch(`/api${path}`, {
+            const normalized = path.startsWith("/") ? path : `/${path}`;
+            const url = new URL(`/api${normalized}`, window.location.origin);
+            const apiPath = url.pathname.replace(/^\/api(?=\/|$)/, "");
+            const denied =
+              apiPath === "/extensions" ||
+              apiPath.startsWith("/extensions/") ||
+              apiPath === "/admin" ||
+              apiPath.startsWith("/admin/");
+            if (denied) {
+              const message = `apiFetch denied: extensions cannot reach ${apiPath}`;
+              console.warn(`[Extension:${ext.name}] ${message}`);
+              return Promise.reject(new Error(message));
+            }
+            const res = await fetch(`${url.pathname}${url.search}`, {
               headers: { "Content-Type": "application/json" },
               ...options,
             });

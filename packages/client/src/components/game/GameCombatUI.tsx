@@ -46,7 +46,27 @@ import {
   Trophy,
   SkullIcon,
   ScrollText,
+  X,
 } from "lucide-react";
+
+// Mobile layout breakpoint. Uses Tailwind's `sm` boundary so the existing
+// desktop classes (`sm:`, `md:`, `lg:`, `xl:`) continue to apply unchanged on
+// the desktop branch and the mobile branch only renders below 640px.
+function useIsCombatMobile(): boolean {
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 639px)").matches : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(max-width: 639px)");
+    const handler = (event: MediaQueryListEvent) => setIsMobile(event.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+  return isMobile;
+}
+
+type MobileDrawerKind = null | "mechanics" | "cues" | "log" | "party";
 
 // ── Types ──
 
@@ -1091,7 +1111,591 @@ export function GameCombatUI({
     return () => window.removeEventListener("keydown", handleKey);
   }, [phase, actionMenuIndex, handleActionSelect, playSfx]);
 
+  // ── Mobile layout state ──
+  // Mobile is treated as a separate render path below — `useIsCombatMobile()` toggles
+  // between the existing desktop tree and a sticky-bottom-action-sheet layout. Drawers
+  // (Mechanics / Cues / Log / Party) replace inline panels that don't fit on small screens.
+  const isMobile = useIsCombatMobile();
+  const [openDrawer, setOpenDrawer] = useState<MobileDrawerKind>(null);
+  // Keyboard parity for tablets / external keyboards: Escape dismisses the drawer
+  // (matches the existing close button + backdrop tap behavior).
+  useEffect(() => {
+    if (!openDrawer) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenDrawer(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openDrawer]);
+
   // ── Render ──
+
+  if (isMobile) {
+    return (
+      <div className="absolute inset-0 z-30 flex h-full flex-col overflow-hidden">
+        {/* Impact flash overlay */}
+        {activeImpactTone && activeImpactTone !== "miss" && (
+          <div
+            key={`${animatingActionIndex}-${activeImpactTone}-mobile`}
+            className={cn(
+              "pointer-events-none absolute inset-0 z-20",
+              activeImpactTone === "critical" && "game-combat-impact-flash game-combat-impact-flash--critical",
+              activeImpactTone === "reaction" && "game-combat-impact-flash game-combat-impact-flash--reaction",
+              activeImpactTone === "hit" && "game-combat-impact-flash",
+              activeImpactTone === "heal" && "game-combat-impact-flash game-combat-impact-flash--heal",
+            )}
+          />
+        )}
+
+        {/* Intro overlay */}
+        {phase === "intro" && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/85 animate-in fade-in duration-300">
+            <div className="flex flex-col items-center gap-3 px-6 text-center animate-in zoom-in-50 duration-500">
+              <Sword className="h-9 w-9 text-red-400" />
+              <AnimatedText html="BATTLE START" className="text-xl font-bold tracking-wide text-white" />
+              <span className="text-xs text-white/60">{enemies.map((e) => e.name).join(", ")}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Top: round counter + compact enemy strip */}
+        <div className="relative z-10 shrink-0 border-b border-white/10 bg-black/70 px-2 py-2 backdrop-blur-md">
+          <div className="flex items-stretch gap-2">
+            <div className="flex shrink-0 flex-col items-center justify-center rounded border border-white/10 bg-white/5 px-2">
+              <span className="text-[0.5rem] font-semibold uppercase tracking-wide text-white/40">Round</span>
+              <span className="text-base font-bold leading-none tabular-nums text-white">{round}</span>
+            </div>
+            <div className="flex flex-1 gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {enemies.map((enemy) => (
+                <MobileCombatantChip
+                  key={enemy.id}
+                  combatant={enemy}
+                  side="enemy"
+                  isTargetable={phase === "target-select" && selectingEnemyTarget}
+                  isActive={turnOrder[0]?.id === enemy.id && phase === "animating"}
+                  onSelect={() => handleTargetSelect(enemy.id)}
+                  damagePopups={damagePopups.filter((p) => p.targetId === enemy.id)}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Middle: scene area (animating narration, victory/defeat overlay, dialogue toast) */}
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+          {phase === "animating" && roundResult && animatingActionIndex >= 0 && (
+            <div className="pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md">
+              <ActionNarration action={roundResult.actions[animatingActionIndex]!} allCombatants={allCombatants} />
+            </div>
+          )}
+          {phase === "resolving" && (
+            <div className="absolute inset-x-2 top-2 z-10 flex items-center gap-2 rounded-lg border border-white/10 bg-black/75 px-3 py-2 text-xs text-white/70 backdrop-blur-md">
+              <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+              {selectedAction === "custom"
+                ? "The Game Master is adjudicating your maneuver..."
+                : "Resolving actions..."}
+            </div>
+          )}
+          {/* Latest dialogue cue floats as a toast */}
+          {visibleCombatDialogue.length > 0 && phase !== "intro" && phase !== "victory" && phase !== "defeat" && (
+            <div className="pointer-events-none absolute inset-x-2 bottom-2 z-10 max-h-[35%] space-y-1 overflow-hidden">
+              {visibleCombatDialogue.slice(-2).map((line, index) => {
+                const isEnemyLine = !voicedCombatSpeakerSet.has(normalizeTTSCharacterName(line.character));
+                return (
+                  <div
+                    key={`mobile-cue-${line.character}-${line.type}-${index}-${line.content.slice(0, 16)}`}
+                    className={cn(
+                      "game-combat-action-bark mx-auto w-fit max-w-full rounded-xl border px-2.5 py-1.5 shadow-lg backdrop-blur-md animate-party-slide-in",
+                      isEnemyLine
+                        ? "border-red-300/20 bg-red-950/60 text-red-50/85"
+                        : "border-sky-300/20 bg-sky-950/60 text-sky-50/90",
+                    )}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span
+                        className={cn(
+                          "text-[0.6rem] font-bold",
+                          isEnemyLine ? "text-red-200" : "text-sky-200",
+                        )}
+                      >
+                        {line.character}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 break-words text-xs leading-snug [overflow-wrap:anywhere]">
+                      {line.content}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {/* Victory / defeat overlays — full-screen on mobile, not buried in the bottom sheet */}
+          {phase === "victory" && (
+            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 px-6 text-center animate-in fade-in duration-500">
+              <Trophy className="h-12 w-12 text-amber-400" />
+              <AnimatedText html="{bounce:Victory!}" className="text-2xl font-bold text-amber-200" />
+              <button
+                onClick={() => onCombatEnd("victory", buildSummary("victory"))}
+                className="rounded-lg bg-amber-500/20 px-6 py-2.5 text-sm font-semibold text-amber-200 ring-1 ring-amber-400/30 transition-colors hover:bg-amber-500/30"
+              >
+                Continue
+              </button>
+            </div>
+          )}
+          {phase === "defeat" && (
+            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 px-6 text-center animate-in fade-in duration-500">
+              <SkullIcon className="h-12 w-12 text-red-400" />
+              <AnimatedText html="{shake:Defeat...}" className="text-2xl font-bold text-red-200" />
+              <AnimatedText html="{pulse:Your party has fallen.}" className="text-xs text-white/55" />
+              <button
+                onClick={() => onCombatEnd("defeat", buildSummary("defeat"))}
+                className="rounded-lg bg-red-500/20 px-6 py-2.5 text-sm font-semibold text-red-200 ring-1 ring-red-400/30 transition-colors hover:bg-red-500/30"
+              >
+                Continue
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom action sheet — sticky, always shows current player + active phase content */}
+        <div className="relative z-30 shrink-0 border-t border-white/10 bg-gradient-to-t from-black/95 to-black/85 backdrop-blur-md">
+          {/* Drawer toggle bar */}
+          <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/5 px-1.5 py-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {combatControlsSlot && (
+              <div className="flex shrink-0 items-center gap-1">{combatControlsSlot}</div>
+            )}
+            <button
+              type="button"
+              onClick={() => setOpenDrawer((d) => (d === "party" ? null : "party"))}
+              className={cn(
+                "shrink-0 rounded border px-2 py-1 text-[0.6rem] font-semibold uppercase tracking-wide",
+                openDrawer === "party"
+                  ? "border-blue-400/40 bg-blue-500/15 text-blue-100"
+                  : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10",
+              )}
+            >
+              Party
+            </button>
+            {combatMechanics.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setOpenDrawer((d) => (d === "mechanics" ? null : "mechanics"))}
+                className={cn(
+                  "shrink-0 rounded border px-2 py-1 text-[0.6rem] font-semibold uppercase tracking-wide",
+                  openDrawer === "mechanics"
+                    ? "border-amber-400/40 bg-amber-500/15 text-amber-100"
+                    : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10",
+                )}
+              >
+                Mech · {combatMechanics.length}
+              </button>
+            )}
+            {visibleCombatDialogue.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setOpenDrawer((d) => (d === "cues" ? null : "cues"))}
+                className={cn(
+                  "shrink-0 rounded border px-2 py-1 text-[0.6rem] font-semibold uppercase tracking-wide",
+                  openDrawer === "cues"
+                    ? "border-sky-400/40 bg-sky-500/15 text-sky-100"
+                    : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10",
+                )}
+              >
+                Cues · {visibleCombatDialogue.length}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setOpenDrawer((d) => (d === "log" ? null : "log"))}
+              className={cn(
+                "shrink-0 rounded border px-2 py-1 text-[0.6rem] font-semibold uppercase tracking-wide",
+                openDrawer === "log"
+                  ? "border-white/30 bg-white/15 text-white"
+                  : "border-white/10 bg-white/5 text-white/55 hover:bg-white/10",
+              )}
+            >
+              Log
+            </button>
+            {turnOrder.length > 0 && (
+              <span className="ml-auto shrink-0 truncate rounded bg-white/5 px-2 py-1 text-[0.55rem] font-semibold uppercase tracking-wide text-white/45">
+                Next: {turnOrder[0]?.name ?? "—"}
+              </span>
+            )}
+          </div>
+
+          {/* Active player mini bar (shown when an action is required) */}
+          {activePlayer &&
+            (phase === "player-turn" ||
+              phase === "skill-select" ||
+              phase === "item-select" ||
+              phase === "custom-action" ||
+              phase === "target-select") && (
+              <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-1.5">
+                <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-blue-500/20 text-blue-300 ring-1 ring-blue-400/40">
+                  {activePlayer.sprite ? (
+                    <img src={activePlayer.sprite} alt={activePlayer.name} className="h-full w-full object-cover" />
+                  ) : (
+                    <span className="text-[0.65rem] font-bold">{activePlayer.name.charAt(0).toUpperCase()}</span>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-semibold text-white">{activePlayer.name}</div>
+                  <div className="text-[0.55rem] tabular-nums text-white/45">
+                    HP {activePlayer.hp}/{activePlayer.maxHp}
+                    {activePlayer.maxMp ? ` · MP ${activePlayer.mp ?? 0}/${activePlayer.maxMp}` : ""}
+                  </div>
+                </div>
+                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[0.55rem] font-semibold uppercase tracking-wide text-amber-200">
+                  Your turn
+                </span>
+              </div>
+            )}
+
+          {/* Phase-specific content — bounded so the action sheet never grows past ~half the screen */}
+          <div className="max-h-[42svh] overflow-y-auto">
+            {phase === "player-turn" && activePlayer && (
+              <div className="grid grid-cols-3 gap-1.5 p-2">
+                {ACTION_MENU.map((action, i) => (
+                  <button
+                    key={action.id}
+                    onClick={() => {
+                      setActionMenuIndex(i);
+                      handleActionSelect(action.id);
+                    }}
+                    className={cn(
+                      "flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-[0.65rem] font-medium transition-all duration-150",
+                      actionMenuIndex === i
+                        ? "border-[var(--primary)]/50 bg-[var(--primary)]/20 text-white"
+                        : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white",
+                    )}
+                  >
+                    <action.icon size={16} className={action.color} />
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {phase === "skill-select" && activePlayer && (
+              <div className="flex flex-col gap-2 p-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={13} className="text-blue-400" />
+                  <div className="text-[0.65rem] text-white/60">
+                    Pick a skill, then a target. Greyed out = not enough MP.
+                  </div>
+                </div>
+                {activePlayer.skills && activePlayer.skills.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {activePlayer.skills.map((skill) => {
+                      const insufficientMp = (activePlayer.mp ?? 0) < skill.mpCost;
+                      return (
+                        <button
+                          key={skill.id}
+                          type="button"
+                          disabled={insufficientMp}
+                          onClick={() => {
+                            setSelectedSkillId(skill.id);
+                            setSelectedItemName(null);
+                            setPhase("target-select");
+                          }}
+                          className={cn(
+                            "flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
+                            insufficientMp
+                              ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                              : "border-blue-400/20 bg-blue-500/10 text-white/85 hover:border-blue-400/40 hover:bg-blue-500/15",
+                          )}
+                        >
+                          <span className="min-w-0 truncate font-semibold text-white/90">{skill.name}</span>
+                          <span className="shrink-0 text-[0.6rem] tabular-nums text-white/45">
+                            {skill.type === "heal" ? "Heal" : "Atk"} · {skill.mpCost} MP
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/45">
+                    No combat skills are available for this combatant.
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    setPhase("player-turn");
+                    setSelectedAction(null);
+                    setSelectedSkillId(null);
+                    setSelectedItemName(null);
+                  }}
+                  className="self-start rounded border border-white/15 px-2 py-0.5 text-[0.65rem] text-white/60 hover:bg-white/10 hover:text-white"
+                >
+                  Back
+                </button>
+              </div>
+            )}
+
+            {phase === "item-select" && activePlayer && (
+              <div className="flex flex-col gap-2 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Backpack size={13} className="text-green-400" />
+                    <span className="text-[0.65rem] text-white/60">Pick an item to use this turn.</span>
+                  </div>
+                  {onOpenInventory && (
+                    <button
+                      type="button"
+                      onClick={onOpenInventory}
+                      className="rounded border border-white/15 px-2 py-0.5 text-[0.6rem] text-white/60 hover:bg-white/10 hover:text-white"
+                    >
+                      Full inventory
+                    </button>
+                  )}
+                </div>
+                {inventoryItems.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {inventoryItems.map((item) => {
+                      const itemEffect = getCombatItemEffect(item.name, combatItemEffects);
+                      return (
+                        <button
+                          key={item.name}
+                          type="button"
+                          onClick={() => handleItemSelect(item.name)}
+                          className="rounded-lg border border-green-400/20 bg-green-500/10 px-3 py-2 text-left text-xs text-white/85 transition-all hover:border-green-400/40 hover:bg-green-500/15"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate font-semibold text-white/90">{item.name}</span>
+                            {item.quantity > 1 && (
+                              <span className="shrink-0 rounded-full bg-white/10 px-1.5 text-[0.55rem] tabular-nums text-white/60">
+                                x{item.quantity}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 line-clamp-2 text-[0.6rem] text-white/45">
+                            {itemEffect?.description || item.description || "Use on the active party member."}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/45">
+                    No items are available in your inventory.
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    setPhase("player-turn");
+                    setSelectedAction(null);
+                    setSelectedSkillId(null);
+                    setSelectedItemName(null);
+                  }}
+                  className="self-start rounded border border-white/15 px-2 py-0.5 text-[0.65rem] text-white/60 hover:bg-white/10 hover:text-white"
+                >
+                  Back
+                </button>
+              </div>
+            )}
+
+            {phase === "custom-action" && activePlayer && (
+              <div className="flex flex-col gap-2 p-2">
+                <div className="flex items-center gap-2">
+                  <Zap size={13} className="text-violet-300" />
+                  <span className="text-[0.65rem] text-white/60">
+                    Describe what you attempt; the GM resolves it.
+                  </span>
+                </div>
+                <textarea
+                  value={customInstruction}
+                  onChange={(event) => setCustomInstruction(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setPhase("player-turn");
+                      setSelectedAction(null);
+                      setSelectedItemName(null);
+                      setCustomInstruction("");
+                    }
+                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      submitCustomInstruction();
+                    }
+                  }}
+                  className="min-h-20 w-full resize-none rounded-lg border border-violet-300/20 bg-violet-500/10 px-2.5 py-2 text-sm leading-relaxed text-white/85 outline-none transition-colors placeholder:text-white/35 focus:border-violet-300/45"
+                  placeholder="I kick sand into the Ruin Guard's cracked lens, trying to blind it for a round."
+                  autoFocus
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={submitCustomInstruction}
+                    disabled={!customInstruction.trim() || !onCustomInstruction}
+                    className="rounded-lg border border-violet-300/25 bg-violet-500/15 px-3 py-1.5 text-xs font-semibold text-violet-100 transition-colors hover:bg-violet-500/25 disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    Ask GM
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhase("player-turn");
+                      setSelectedAction(null);
+                      setSelectedItemName(null);
+                      setCustomInstruction("");
+                    }}
+                    className="rounded border border-white/15 px-2 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white"
+                  >
+                    Back
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {phase === "target-select" && (
+              <div className="flex flex-col gap-2 px-3 py-2">
+                <div className="flex items-start gap-2">
+                  <Zap size={13} className="mt-0.5 shrink-0 text-amber-400" />
+                  <AnimatedText
+                    html={
+                      selectedAction === "skill" && selectedSkill
+                        ? `Tap a ${selectingAllyTarget ? "party member" : "target"} for ${selectedSkill.name}...`
+                        : selectedAction === "item" && selectedItemName
+                          ? `Tap a ${selectingAllyTarget ? "party member" : "target"} for ${selectedItemName}...`
+                          : "Tap a target..."
+                    }
+                    className="min-w-0 break-words text-xs text-amber-200 [overflow-wrap:anywhere]"
+                  />
+                </div>
+                {selectingAllyTarget && (
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {party.map((member) => (
+                      <button
+                        key={member.id}
+                        type="button"
+                        disabled={member.hp <= 0}
+                        onClick={() => handleTargetSelect(member.id)}
+                        className={cn(
+                          "flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs",
+                          member.hp <= 0
+                            ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                            : "border-blue-400/30 bg-blue-500/10 text-white/85 hover:bg-blue-500/15",
+                        )}
+                      >
+                        <span className="min-w-0 truncate font-semibold">{member.name}</span>
+                        <span className="shrink-0 text-[0.6rem] tabular-nums text-white/55">
+                          HP {member.hp}/{member.maxHp}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    setPhase(
+                      selectedAction === "skill"
+                        ? "skill-select"
+                        : selectedAction === "item"
+                          ? "item-select"
+                          : "player-turn",
+                    );
+                    if (selectedAction !== "skill" && selectedAction !== "item") {
+                      setSelectedAction(null);
+                      setSelectedSkillId(null);
+                      setSelectedItemName(null);
+                    }
+                  }}
+                  className="self-start rounded border border-white/15 px-2 py-0.5 text-[0.65rem] text-white/60 hover:bg-white/10 hover:text-white"
+                >
+                  Back
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Slide-up drawer */}
+        {openDrawer && (
+          <div
+            className="absolute inset-0 z-40 flex flex-col bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+            onClick={() => setOpenDrawer(null)}
+          >
+            <div className="mt-auto" />
+            <div
+              className="relative max-h-[60svh] min-h-[20svh] overflow-y-auto rounded-t-xl border-t border-white/10 bg-gradient-to-t from-black/95 to-black/90 px-3 py-3 animate-in slide-in-from-bottom-4 duration-200"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-white/65">
+                  {openDrawer === "party" && "Party"}
+                  {openDrawer === "mechanics" && "Boss Mechanics"}
+                  {openDrawer === "cues" && "Dialogue"}
+                  {openDrawer === "log" && "Combat Log"}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setOpenDrawer(null)}
+                  className="rounded p-1 text-white/55 hover:bg-white/10 hover:text-white"
+                  aria-label="Close drawer"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              {openDrawer === "party" && (
+                <div className="grid grid-cols-2 gap-2">
+                  {party.map((member, i) => (
+                    <CombatantCard
+                      key={member.id}
+                      combatant={member}
+                      side="player"
+                      isTargetable={phase === "target-select" && selectingAllyTarget}
+                      isActive={
+                        (phase === "player-turn" && i === activePlayerIndex) ||
+                        (turnOrder[0]?.id === member.id && phase === "animating")
+                      }
+                      onSelect={
+                        phase === "target-select" && selectingAllyTarget
+                          ? () => {
+                              handleTargetSelect(member.id);
+                              setOpenDrawer(null);
+                            }
+                          : undefined
+                      }
+                      damagePopups={damagePopups.filter((p) => p.targetId === member.id)}
+                    />
+                  ))}
+                </div>
+              )}
+              {openDrawer === "mechanics" && (
+                <CombatMechanicsPanel mechanics={combatMechanics} round={round} />
+              )}
+              {openDrawer === "cues" && (
+                <CombatDialoguePanel lines={visibleCombatDialogue} voiceableSpeakers={voicedCombatSpeakerSet} />
+              )}
+              {openDrawer === "log" && (
+                <div className="space-y-1 pr-1">
+                  {combatLogEntries.length === 0 ? (
+                    <div className="rounded border border-white/10 bg-white/5 px-2 py-1.5 text-[0.65rem] text-white/45">
+                      No combat events recorded yet.
+                    </div>
+                  ) : (
+                    combatLogEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className={cn(
+                          "min-w-0 break-words rounded border px-2 py-1 text-xs leading-relaxed [overflow-wrap:anywhere]",
+                          entry.tone === "system" && "border-white/5 bg-white/[0.03] text-white/55",
+                          entry.tone === "status" && "border-amber-300/10 bg-amber-500/8 text-amber-100/75",
+                          (!entry.tone || entry.tone === "action") && "border-white/5 bg-black/20 text-white/75",
+                        )}
+                      >
+                        {entry.text}
+                      </div>
+                    ))
+                  )}
+                  <div ref={combatLogEndRef} />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="absolute inset-0 z-30 flex min-h-0 flex-col overflow-hidden">
@@ -1828,6 +2432,121 @@ function CombatantCard({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Compact mobile-only combatant chip used in the top enemy strip on small viewports.
+ * Single horizontal row: small avatar + name + HP bar. Designed for the mobile combat
+ * layout where the full CombatantCard would push the bottom action sheet off-screen
+ * once a couple of enemies are present.
+ */
+function MobileCombatantChip({
+  combatant,
+  side,
+  isTargetable,
+  isActive,
+  onSelect,
+  damagePopups,
+}: {
+  combatant: Combatant;
+  side: "player" | "enemy";
+  isTargetable: boolean;
+  isActive: boolean;
+  onSelect?: () => void;
+  damagePopups: DamagePopup[];
+}) {
+  const hpPercent = combatant.maxHp > 0 ? (combatant.hp / combatant.maxHp) * 100 : 0;
+  const isKo = combatant.hp <= 0;
+  const hpColor = hpPercent > 60 ? "bg-emerald-500" : hpPercent > 25 ? "bg-amber-500" : "bg-red-500";
+  const latestPopup = damagePopups[damagePopups.length - 1] ?? null;
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={!isTargetable || isKo}
+      className={cn(
+        "relative flex h-full min-w-[7rem] shrink-0 items-center gap-1.5 rounded-lg border px-1.5 py-1 transition-all",
+        side === "enemy" ? "bg-red-500/8" : "bg-blue-500/8",
+        isTargetable && !isKo
+          ? "cursor-pointer border-amber-400/55 hover:border-amber-300"
+          : isActive && !isKo
+            ? "border-white/35"
+            : "border-white/10",
+        isKo && "grayscale opacity-40",
+      )}
+    >
+      <div
+        className={cn(
+          "relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md",
+          side === "enemy" ? "bg-red-500/15 text-red-300/65" : "bg-blue-500/15 text-blue-300/65",
+        )}
+      >
+        {combatant.sprite ? (
+          <img src={combatant.sprite} alt={combatant.name} className="h-full w-full object-cover" />
+        ) : (
+          <span className="text-sm font-bold">{combatant.name.charAt(0).toUpperCase()}</span>
+        )}
+        {isKo && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/55">
+            <Skull className="h-4 w-4 text-red-400/80" />
+          </div>
+        )}
+        {latestPopup && (
+          <div className="pointer-events-none absolute -top-3 left-1/2 -translate-x-1/2">
+            <DamageNumber popup={latestPopup} />
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1 text-left">
+        <div className="flex items-center gap-1">
+          <span
+            className={cn(
+              "min-w-0 truncate text-[0.65rem] font-semibold",
+              isKo ? "text-white/30" : "text-white/90",
+            )}
+          >
+            {combatant.name}
+          </span>
+          <span className="rounded bg-white/10 px-1 text-[0.5rem] tabular-nums text-white/45">
+            Lv.{combatant.level}
+          </span>
+        </div>
+        <div className="mt-1 flex items-center gap-1">
+          <Heart size={8} className={cn(isKo ? "text-white/20" : "text-red-400")} />
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+            <div
+              className={cn("h-full rounded-full transition-all duration-500 ease-out", hpColor)}
+              style={{ width: `${hpPercent}%` }}
+            />
+          </div>
+          <span className="shrink-0 text-[0.5rem] tabular-nums text-white/55">
+            {combatant.hp}
+          </span>
+        </div>
+        {combatant.statusEffects && combatant.statusEffects.length > 0 && (
+          <div className="mt-0.5 flex gap-0.5 overflow-hidden">
+            {combatant.statusEffects.slice(0, 4).map((effect, i) => (
+              <span
+                key={`${effect.name}-${i}`}
+                title={`${effect.name} (${effect.turnsLeft} turns)`}
+                className="text-[0.6rem]"
+                aria-hidden="true"
+              >
+                {getStatusEffectEmoji(effect)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {isTargetable && !isKo && (
+        <div className="pointer-events-none absolute -inset-0.5 animate-pulse rounded-lg border border-amber-400/60" />
+      )}
+      {isActive && !isKo && (
+        <div className="pointer-events-none absolute -bottom-0.5 left-1/2 h-1 w-5 -translate-x-1/2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+      )}
+    </button>
   );
 }
 

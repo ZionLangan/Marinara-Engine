@@ -47,7 +47,14 @@ import {
 import { resolveCombatRound, type CombatantStats } from "../services/game/combat.service.js";
 import { getElementPreset, listElementPresets } from "../services/game/element-reactions.service.js";
 import { generateCombatLoot, generateLootTable } from "../services/game/loot.service.js";
-import { advanceTime, formatGameTime, createInitialTime, type GameTime } from "../services/game/time.service.js";
+import {
+  advanceTime,
+  formatGameTime,
+  createInitialTime,
+  setTimeOfDay,
+  type GameTime,
+  type TimeOfDay,
+} from "../services/game/time.service.js";
 import { generateWeather, inferBiome, shouldWeatherChange } from "../services/game/weather.service.js";
 import { rollEncounter, rollEnemyCount } from "../services/game/encounter.service.js";
 import { processReputationActions } from "../services/game/reputation.service.js";
@@ -492,6 +499,10 @@ function parseMeta(raw: unknown): Record<string, unknown> {
     }
   }
   return (raw as Record<string, unknown>) ?? {};
+}
+
+function isTimeOfDayLabel(action: string): action is TimeOfDay {
+  return ["dawn", "morning", "afternoon", "evening", "night", "midnight"].includes(action);
 }
 
 function normalizeCharacterLookupName(value: string): string {
@@ -2502,6 +2513,7 @@ export async function gameRoutes(app: FastifyInstance) {
   const buildHydratedGameMeta = async (
     chatId: string,
     baseMeta: Record<string, unknown>,
+    options: { explicitLocation?: string | null } = {},
   ): Promise<Record<string, unknown>> => {
     const gameStateStore = createGameStateStorage(app.db);
     const latestState = await gameStateStore.getLatest(chatId);
@@ -2513,7 +2525,12 @@ export async function gameRoutes(app: FastifyInstance) {
     }
 
     const activeQuests = extractActiveQuests(latestState?.playerStats);
-    const currentLocation = typeof latestState?.location === "string" ? latestState.location : null;
+    // Prefer a caller-supplied explicit location over the most recent snapshot. The snapshot's
+    // location field only refreshes after /generate persists a new game state, so callers that
+    // have just committed a deliberate move (e.g. /map/move) need to override it — otherwise the
+    // sync and journal reconciliation below run against the previous location.
+    const snapshotLocation = typeof latestState?.location === "string" ? latestState.location : null;
+    const currentLocation = options.explicitLocation ?? snapshotLocation;
     hydratedMeta = syncGameMapMetaPartyPosition(hydratedMeta, currentLocation);
     const currentJournal = (hydratedMeta.gameJournal as Journal) ?? createJournal();
     return {
@@ -4892,14 +4909,32 @@ export async function gameRoutes(app: FastifyInstance) {
       }
     }
 
+    // Resolve the destination's label so hydration's location-derived reconciliation
+    // (syncGameMapMetaPartyPosition + reconcileJournal) runs against the explicit move
+    // instead of the stale snapshot location.
+    const explicitLocation =
+      typeof position === "string"
+        ? (updatedMap.nodes?.find((node) => node.id === position)?.label ?? position)
+        : (updatedMap.cells?.find((cell) => cell.x === position.x && cell.y === position.y)?.label ?? null);
+
     const nextMeta = markNpcsMetAtCurrentLocation(withActiveGameMapMeta(meta, updatedMap));
-    const hydratedMeta = await buildHydratedGameMeta(chatId, nextMeta);
-    await chats.updateMetadata(chatId, hydratedMeta);
+    const hydratedMeta = await buildHydratedGameMeta(chatId, nextMeta, { explicitLocation });
+    // syncGameMapMetaPartyPosition matches by label across all maps, so a label collision
+    // could leave hydratedMeta.gameMap pointing at a different map than the one the client
+    // clicked within. Anchor finalMap to the hydrated copy of the target map (falling back
+    // to updatedMap) and re-apply the exact chosen position so the response stays consistent
+    // with the user's click.
+    const hydratedMaps = getGameMapsFromMeta(hydratedMeta);
+    const hydratedTargetMap =
+      hydratedMaps.find((entry, index) => getGameMapId(entry, index) === targetMapId) ?? updatedMap;
+    const finalMap: GameMap = { ...hydratedTargetMap, partyPosition: position };
+    const finalMeta = withActiveGameMapMeta(hydratedMeta, finalMap);
+    await chats.updateMetadata(chatId, finalMeta);
 
     return {
-      map: (hydratedMeta.gameMap as GameMap) ?? updatedMap,
-      maps: getGameMapsFromMeta(hydratedMeta),
-      activeGameMapId: (hydratedMeta.activeGameMapId as string | null) ?? getGameMapId(hydratedMeta.gameMap as GameMap),
+      map: (finalMeta.gameMap as GameMap) ?? finalMap,
+      maps: getGameMapsFromMeta(finalMeta),
+      activeGameMapId: (finalMeta.activeGameMapId as string | null) ?? getGameMapId(finalMeta.gameMap as GameMap),
     };
   });
 
@@ -5122,24 +5157,9 @@ export async function gameRoutes(app: FastifyInstance) {
 
     const meta = parseMeta(chat.metadata);
     const currentTime = (meta.gameTime as GameTime) ?? createInitialTime();
-
-    // Scene analyzer sends a time-of-day label (dawn, morning, etc.) — set directly
-    const TOD_HOURS: Record<string, number> = {
-      dawn: 6,
-      morning: 8,
-      noon: 12,
-      afternoon: 14,
-      evening: 18,
-      night: 21,
-      midnight: 0,
-    };
     let newTime: GameTime;
-    if (TOD_HOURS[action] != null) {
-      newTime = { ...currentTime, hour: TOD_HOURS[action]!, minute: 0 };
-      // If the target hour is behind current, advance to next day
-      if (newTime.hour <= currentTime.hour) {
-        newTime.day = currentTime.day + 1;
-      }
+    if (isTimeOfDayLabel(action)) {
+      newTime = setTimeOfDay(currentTime, action);
     } else {
       newTime = advanceTime(currentTime, action);
     }

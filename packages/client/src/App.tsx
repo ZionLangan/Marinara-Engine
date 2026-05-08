@@ -14,6 +14,7 @@ import { useSidecarStore } from "./stores/sidecar.store";
 import { api } from "./lib/api-client";
 import { forceRefreshSpa } from "./lib/browser-runtime";
 import { useLegacyThemeMigration } from "./hooks/use-themes";
+import { useLegacyExtensionMigration } from "./hooks/use-extensions";
 import { useSettingsSync } from "./hooks/use-settings-sync";
 
 const VERSION_RECOVERY_KEY = "marinara:pwa-version-recovery";
@@ -27,6 +28,23 @@ type HealthResponse = {
   timestamp: string;
   version: string;
 };
+
+function stripFontFamilyQuotes(family: string): string {
+  const trimmed = family.trim();
+  if (trimmed.length < 2) return trimmed;
+
+  const quote = trimmed[0];
+  if ((quote !== `"` && quote !== `'`) || trimmed[trimmed.length - 1] !== quote) {
+    return trimmed;
+  }
+
+  return trimmed.slice(1, -1).trim();
+}
+
+function toCssFontFamilyValue(family: string): string {
+  const cleanFamily = stripFontFamilyQuotes(family);
+  return `"${cleanFamily.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
 
 async function recoverFromVersionSkew(serverVersion: string) {
   if (sessionStorage.getItem(VERSION_RECOVERY_KEY) === serverVersion) {
@@ -49,6 +67,7 @@ export function App() {
   const fontFamily = useUIStore((s) => s.fontFamily);
   const hasModalOpen = useUIStore((s) => s.modal !== null);
   useLegacyThemeMigration();
+  useLegacyExtensionMigration();
   useSettingsSync();
   const showDownloadModal = useSidecarStore((s) => s.showDownloadModal);
   const setShowDownloadModal = useSidecarStore((s) => s.setShowDownloadModal);
@@ -138,8 +157,9 @@ export function App() {
 
   // Apply custom font family via CSS variable
   useEffect(() => {
-    if (fontFamily) {
-      document.documentElement.style.setProperty("--font-user", `"${fontFamily}"`);
+    const family = fontFamily ? stripFontFamilyQuotes(fontFamily) : "";
+    if (family) {
+      document.documentElement.style.setProperty("--font-user", toCssFontFamilyValue(family));
     } else {
       document.documentElement.style.removeProperty("--font-user");
     }
@@ -166,8 +186,14 @@ export function App() {
       }
 
       try {
-        const fontFace = new FontFace(f.family, `url("${f.url}")`, {
+        const family = stripFontFamilyQuotes(f.family);
+        if (!family) {
+          return;
+        }
+
+        const fontFace = new FontFace(family, `url("${f.url}")`, {
           display: "swap",
+          weight: "400",
         });
 
         fontFace

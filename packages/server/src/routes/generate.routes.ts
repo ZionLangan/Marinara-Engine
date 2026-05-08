@@ -60,7 +60,7 @@ import {
 import { executeToolCalls, type MetadataPatchInput } from "../services/tools/tool-executor.js";
 import { createAgentPipeline, type ResolvedAgent, type AgentInjection } from "../services/agents/agent-pipeline.js";
 import { DATA_DIR } from "../utils/data-dir.js";
-import { executeAgent, resolveAgentResultType } from "../services/agents/agent-executor.js";
+import { executeAgent, normalizeAgentContextSize, resolveAgentResultType } from "../services/agents/agent-executor.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import {
   parseCharacterCommands,
@@ -119,6 +119,7 @@ import {
   parseStoredGenerationParameters,
   parseGameStateRow,
   resolveBaseUrl,
+  shouldEnableAgentsForGeneration,
   wrapFields,
   type PromptAttachment,
   type SimpleMessage,
@@ -141,8 +142,14 @@ import {
   buildDefaultAgentConnectionWarning,
   buildLocalSidecarUnavailableWarning,
   isLocalSidecarConnectionId,
+  resolveAgentConnectionId,
   type AgentConnectionWarning,
 } from "./generate/agent-connection-guards.js";
+import {
+  normalizeContextInjections,
+  normalizeSecretPlotSceneDirections,
+  normalizeStringArray,
+} from "./generate/agent-normalizers.js";
 import {
   createJournal,
   addLocationEntry,
@@ -666,7 +673,10 @@ export async function generateRoutes(app: FastifyInstance) {
     }
 
     // Resolve connection
-    let connId = input.connectionId ?? chat.connectionId;
+    const impersonateConnectionOverride =
+      input.impersonate && input.impersonateConnectionId ? input.impersonateConnectionId : null;
+    const fallbackConnectionId = input.connectionId || chat.connectionId;
+    let connId = impersonateConnectionOverride || fallbackConnectionId;
 
     // ── Random connection: pick one from the random pool ──
     if (connId === "random") {
@@ -681,7 +691,23 @@ export async function generateRoutes(app: FastifyInstance) {
     if (!connId) {
       return reply.status(400).send({ error: "No API connection configured for this chat" });
     }
-    const conn = await connections.getWithKey(connId);
+    let conn = await connections.getWithKey(connId);
+    if (!conn && impersonateConnectionOverride && connId === impersonateConnectionOverride && fallbackConnectionId) {
+      logger.warn(
+        "[generate] Impersonate connection override %s was not found; falling back to chat/request connection",
+        impersonateConnectionOverride,
+      );
+      connId = fallbackConnectionId;
+      if (connId === "random") {
+        const pool = await connections.listRandomPool();
+        if (!pool.length) {
+          return reply.status(400).send({ error: "No connections are marked for the random pool" });
+        }
+        const picked = pool[Math.floor(Math.random() * pool.length)];
+        connId = picked.id;
+      }
+      conn = connId ? await connections.getWithKey(connId) : null;
+    }
     if (!conn) {
       return reply.status(400).send({ error: "API connection not found" });
     }
@@ -702,7 +728,9 @@ export async function generateRoutes(app: FastifyInstance) {
     // Set up SSE headers
     startSseReply(reply, { "X-Accel-Buffering": "no" });
 
+    let generationComplete = false;
     const onClose = () => {
+      if (generationComplete) return;
       logger.info("[abort] Client disconnected — aborting generation");
       abortController.abort();
       if (activeGenerations) activeGenerations.delete(input.chatId);
@@ -714,7 +742,7 @@ export async function generateRoutes(app: FastifyInstance) {
         }).catch(() => {});
       }
     };
-    req.raw.on("close", onClose);
+    reply.raw.on("close", onClose);
     if (requestChatMode === "conversation" && !input.impersonate) {
       conversationGenerationStartedAt = markGenerationInProgress(input.chatId);
     }
@@ -925,8 +953,35 @@ export async function generateRoutes(app: FastifyInstance) {
       }
 
       // ── Assembler path: use preset if the chat has one ──
-      const presetId = chatMode === "conversation" ? undefined : ((chat.promptPresetId as string | null) ?? undefined);
-      const chatChoices = (chatMeta.presetChoices ?? {}) as Record<string, string | string[]>;
+      let presetId = chatMode === "conversation"
+        ? undefined
+        : (input.impersonate && input.impersonatePresetId
+            ? input.impersonatePresetId
+            : (chat.promptPresetId as string | null) ?? undefined);
+      let resolvedPreset = presetId ? await presets.getById(presetId) : null;
+      const usingImpersonatePreset = !!(input.impersonate && input.impersonatePresetId);
+      if (usingImpersonatePreset && !resolvedPreset) {
+        presetId = (chat.promptPresetId as string | null) ?? undefined;
+        resolvedPreset = presetId ? await presets.getById(presetId) : null;
+      }
+      const usingResolvedImpersonatePreset =
+        usingImpersonatePreset && !!resolvedPreset && presetId === input.impersonatePresetId;
+      const impersonatePresetDiffers = usingResolvedImpersonatePreset && input.impersonatePresetId !== chat.promptPresetId;
+      const impersonateDefaultChoices = impersonatePresetDiffers
+        ? (() => {
+            try {
+              const raw = resolvedPreset?.defaultChoices as string | undefined;
+              if (!raw) return {};
+              const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+              return parsed as Record<string, string | string[]>;
+            } catch {
+              return {};
+            }
+          })()
+        : null;
+      const chatChoices: Record<string, string | string[]> = impersonateDefaultChoices
+        ?? (chatMeta.presetChoices ?? {}) as Record<string, string | string[]>;
 
       let finalMessages: Array<{
         role: "system" | "user" | "assistant";
@@ -954,7 +1009,12 @@ export async function generateRoutes(app: FastifyInstance) {
       // Determine whether agents are enabled for this chat (needed by assembler + agent pipeline)
       // Conversation mode chats never run roleplay agents — force agents off.
       logger.info("[generate] chatId=%s, chatMode=%s", input.chatId, chatMode);
-      const chatEnableAgents = chatMeta.enableAgents === true && chatMode !== "conversation";
+      const chatEnableAgents = shouldEnableAgentsForGeneration({
+        chatEnableAgents: chatMeta.enableAgents === true,
+        chatMode,
+        impersonate: input.impersonate,
+        impersonateBlockAgents: input.impersonateBlockAgents,
+      });
       const chatActiveAgentIds: string[] = Array.isArray(chatMeta.activeAgentIds)
         ? (chatMeta.activeAgentIds as string[])
         : [];
@@ -1045,9 +1105,8 @@ export async function generateRoutes(app: FastifyInstance) {
 
       sendProgress("assembling");
       const _tAssemble = Date.now();
-      if (presetId) {
-        const preset = await presets.getById(presetId);
-        if (preset) {
+      if (presetId && resolvedPreset) {
+        const preset = resolvedPreset;
           wrapFormat = (preset.wrapFormat as "xml" | "markdown" | "none") || "xml";
           const [sections, groups, choiceBlocks] = await Promise.all([
             presets.listSections(presetId),
@@ -1122,7 +1181,6 @@ export async function generateRoutes(app: FastifyInstance) {
               entryStateOverrides: assembled.updatedEntryStateOverrides,
             });
           }
-        }
       }
 
       // ── Conversation mode: inject built-in DM-style system prompt when no preset ──
@@ -2520,7 +2578,13 @@ export async function generateRoutes(app: FastifyInstance) {
         let agentModel = conn.model;
 
         // Resolve connection: per-agent override > default-for-agents > chat connection
-        if (isLocalSidecarConnectionId(cfg.connectionId) && !localSidecarAvailableForTrackers) {
+        const effectiveConnectionId = resolveAgentConnectionId({
+          requestedConnectionId: cfg.connectionId as string | null,
+          defaultAgentConnectionId: defaultAgentConn?.id ?? null,
+          localSidecarAvailable: localSidecarAvailableForTrackers,
+        });
+
+        if (effectiveConnectionId === "skip-local-sidecar") {
           skippedLocalSidecarAgents.push(cfg.name ?? cfg.type);
           logger.warn(
             "[generate] Skipping agent %s for chat %s because Local Model was requested but the sidecar is unavailable",
@@ -2529,8 +2593,6 @@ export async function generateRoutes(app: FastifyInstance) {
           );
           continue;
         }
-
-        const effectiveConnectionId = cfg.connectionId ?? defaultAgentConn?.id ?? null;
         if (defaultAgentConn && effectiveConnectionId === defaultAgentConn.id) {
           defaultAgentConnectionAgents.push(cfg.name ?? cfg.type);
         }
@@ -2565,7 +2627,7 @@ export async function generateRoutes(app: FastifyInstance) {
           name: cfg.name,
           phase: cfg.phase as string,
           promptTemplate: cfg.promptTemplate as string,
-          connectionId: cfg.connectionId as string | null,
+          connectionId: effectiveConnectionId,
           settings,
           provider: agentProvider,
           model: agentModel,
@@ -3552,7 +3614,9 @@ export async function generateRoutes(app: FastifyInstance) {
       // Build base agent context (without mainResponse — that comes after generation)
       // Fetch enough history for the hungriest agent — individual agents trim to their own contextSize.
       const agentContextSize =
-        resolvedAgents.length > 0 ? Math.max(...resolvedAgents.map((a) => (a.settings.contextSize as number) || 5)) : 5;
+        resolvedAgents.length > 0
+          ? Math.max(...resolvedAgents.map((a) => normalizeAgentContextSize(a.settings.contextSize)))
+          : 5;
       const agentSlice = chatMessages.slice(-agentContextSize);
 
       // Batch-fetch committed game state snapshots for assistant messages in the agent context
@@ -3812,9 +3876,11 @@ export async function generateRoutes(app: FastifyInstance) {
           const mem = await agentsStore.getMemory(secretPlotAgent.id, input.chatId);
           const state: Record<string, unknown> = {};
           if (mem.overarchingArc) state.overarchingArc = mem.overarchingArc;
-          if (mem.sceneDirections) state.sceneDirections = mem.sceneDirections;
+          const sceneDirections = normalizeSecretPlotSceneDirections(mem.sceneDirections);
+          if (sceneDirections.length > 0) state.sceneDirections = sceneDirections;
           if (mem.pacing) state.pacing = mem.pacing;
-          if (mem.recentlyFulfilled) state.recentlyFulfilled = mem.recentlyFulfilled;
+          const recentlyFulfilled = normalizeStringArray(mem.recentlyFulfilled);
+          if (recentlyFulfilled.length > 0) state.recentlyFulfilled = recentlyFulfilled;
           if (mem.staleDetected != null) state.staleDetected = mem.staleDetected;
           if (Object.keys(state).length > 0) {
             agentContext.memory._secretPlotState = state;
@@ -4831,7 +4897,7 @@ export async function generateRoutes(app: FastifyInstance) {
               await agentsStore.setMemory(agentConfigId, input.chatId, "overarchingArc", plotData.overarchingArc);
             }
             if (plotData.sceneDirections) {
-              const allDirections = plotData.sceneDirections as Array<{ direction: string; fulfilled: boolean }>;
+              const allDirections = normalizeSecretPlotSceneDirections(plotData.sceneDirections);
               const active = allDirections.filter((d) => !d.fulfilled);
               const justFulfilled = allDirections.filter((d) => d.fulfilled).map((d) => d.direction);
               await agentsStore.setMemory(agentConfigId, input.chatId, "sceneDirections", active);
@@ -4839,7 +4905,7 @@ export async function generateRoutes(app: FastifyInstance) {
               // Keep a rolling window of recently fulfilled directions so the agent doesn't repeat them
               if (justFulfilled.length > 0) {
                 const mem = await agentsStore.getMemory(agentConfigId, input.chatId);
-                const prev = (mem.recentlyFulfilled as string[] | undefined) ?? [];
+                const prev = normalizeStringArray(mem.recentlyFulfilled);
                 const merged = [...prev, ...justFulfilled].slice(-10); // keep last 10
                 await agentsStore.setMemory(agentConfigId, input.chatId, "recentlyFulfilled", merged);
               }
@@ -4894,18 +4960,15 @@ export async function generateRoutes(app: FastifyInstance) {
         // knowledge-router) — which `hasPreGenAgents` excludes. Without this, a chat whose
         // only pre-gen agent is KR or Router would silently drop the lore on every regen.
         const regenExtra = parseExtra(regenMsg?.extra);
-        const rawCached = regenExtra.contextInjections as AgentInjection[] | string[] | undefined;
+        // Backwards compat: old caches stored plain string[], and some edited
+        // caches may contain a mix of legacy strings and object-shaped entries.
+        const cached = normalizeContextInjections(regenExtra.contextInjections);
+        // Secret plot is applied from agent memory, not from message cache (legacy entries ignored)
+        const cachedSansSecret = cached.filter((i) => i.agentType !== "secret-plot-driver");
 
-        // Backwards compat: old caches stored plain string[], upgrade to AgentInjection[]
-        const cached: AgentInjection[] | undefined = rawCached?.length
-          ? typeof rawCached[0] === "string"
-            ? (rawCached as string[]).map((text) => ({ agentType: "prose-guardian", text }))
-            : (rawCached as AgentInjection[])
-          : undefined;
-
-        if (cached && cached.length > 0) {
-          contextInjections = cached;
-          for (const inj of cached) {
+        if (cachedSansSecret && cachedSansSecret.length > 0) {
+          contextInjections = cachedSansSecret;
+          for (const inj of cachedSansSecret) {
             reply.raw.write(
               `data: ${JSON.stringify({
                 type: "agent_result",
@@ -4989,9 +5052,7 @@ export async function generateRoutes(app: FastifyInstance) {
         try {
           const plotMem = await agentsStore.getMemory(secretPlotAgent.id, input.chatId);
           const arcRaw = plotMem.overarchingArc as Record<string, unknown> | string | undefined;
-          const sceneDirections = plotMem.sceneDirections as
-            | Array<{ direction: string; fulfilled?: boolean }>
-            | undefined;
+          const sceneDirections = normalizeSecretPlotSceneDirections(plotMem.sceneDirections);
 
           // Inject overarching arc into the prompt
           if (arcRaw) {
@@ -5076,8 +5137,8 @@ export async function generateRoutes(app: FastifyInstance) {
           }
 
           // Inject scene directions into the tracker block
-          const activeDirections = sceneDirections?.filter((d) => !d.fulfilled);
-          if (activeDirections && activeDirections.length > 0) {
+          const activeDirections = sceneDirections.filter((d) => !d.fulfilled);
+          if (activeDirections.length > 0) {
             const dirLines = activeDirections.map((d) => `- ${d.direction}`).join("\n");
             const dirBlock = wrapContent(dirLines, "scene_directions", wrapFormat);
 
@@ -5281,7 +5342,7 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
       // ── Impersonate: inject instruction to respond as the user's character ──
       if (input.impersonate) {
         const impersonateInstruction = buildImpersonateInstruction({
-          customPrompt: chatMeta.impersonatePrompt,
+          customPrompt: input.impersonatePromptTemplate || chatMeta.impersonatePrompt,
           direction: input.userMessage,
           personaName,
           personaDescription,
@@ -5527,6 +5588,7 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
           images?: string[];
           providerMetadata?: Record<string, unknown>;
         }>,
+        markGenerationCommitted = false,
       ): Promise<{
         savedMsg: Awaited<ReturnType<typeof chats.createMessage>>;
         response: string;
@@ -6098,14 +6160,31 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
           // Exception: if the model emitted character commands (e.g. [fetch:...]) with
           // no surrounding prose, treat the commands as the useful output. Skip saving
           // a blank assistant bubble but still return the commands so they execute.
-          if (!fullResponse.trim() && !input.impersonate) {
-            if (parsedCommands.length > 0) {
+          if (!fullResponse.trim()) {
+            if (!input.impersonate && parsedCommands.length > 0) {
               logger.info(
-                "[generate] Model emitted %d command(s) with no visible prose for chat %s; executing commands without saving a message",
+                "[generate] Model emitted %d command(s) with no visible prose for chat %s; saving hidden command anchor",
                 parsedCommands.length,
                 input.chatId,
               );
-              return { savedMsg: null, response: "", commands: parsedCommands, oocMessages, characterId: targetCharId };
+              const savedMsg = await chats.createMessage({
+                chatId: input.chatId,
+                role: "assistant",
+                characterId: targetCharId,
+                content: "",
+              });
+              const anchoredMsg = savedMsg?.id
+                ? await chats.updateMessageExtra(savedMsg.id, {
+                    hiddenFromUser: true,
+                    hiddenFromAI: true,
+                    commandOnly: true,
+                    isGenerated: true,
+                  })
+                : savedMsg;
+              if (markGenerationCommitted && anchoredMsg?.id) {
+                generationComplete = true;
+              }
+              return { savedMsg: anchoredMsg, response: "", commands: parsedCommands, oocMessages, characterId: targetCharId };
             }
             logger.warn(`[generate] Empty response from model for chat ${input.chatId} (char: ${targetCharId})`);
             reply.raw.write(
@@ -6126,6 +6205,9 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
               characterId: input.impersonate ? null : targetCharId,
               content: fullResponse,
             });
+          }
+          if (markGenerationCommitted && savedMsg?.id) {
+            generationComplete = true;
           }
           if (chatMode === "conversation" && !input.impersonate && !input.regenerateMessageId) {
             recordAssistantActivity(input.chatId, targetCharId ?? undefined);
@@ -6169,10 +6251,9 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
             const cachedReasoning = encryptedReasoningCache.get(input.chatId);
             if (cachedReasoning?.length) extraUpdate.encryptedReasoning = cachedReasoning;
             else extraUpdate.encryptedReasoning = null;
-            // Cache context injections (prose-guardian etc.) on the message so regens can reuse them
-            if (!input.regenerateMessageId && contextInjections.length > 0) {
-              extraUpdate.contextInjections = contextInjections;
-            }
+            // Cache the exact prompt injections used for this swipe so future
+            // regenerations and swipe switches replay the same guidance.
+            extraUpdate.contextInjections = contextInjections.length > 0 ? contextInjections : null;
             // Cache the final prompt (what was actually sent to the model) for Peek Prompt
             extraUpdate.cachedPrompt = finalPromptSent.map((m) => ({ role: m.role, content: m.content }));
             await chats.updateMessageExtra(savedMsg.id, extraUpdate);
@@ -6281,8 +6362,14 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
       }
 
       // ── Run generation ──
+      let firstSavedMsg: any = null;
       let lastSavedMsg: any = null;
-      const collectedCommands: Array<{ command: CharacterCommand; characterId: string | null; messageId: string }> = [];
+      const collectedCommands: Array<{
+        command: CharacterCommand;
+        characterId: string | null;
+        messageId: string;
+        swipeIndex: number;
+      }> = [];
       const collectedOocMessages: string[] = [];
 
       const normalizedGenerationGuide = typeof input.generationGuide === "string" ? input.generationGuide.trim() : "";
@@ -6337,12 +6424,22 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
           // Add as a system message at the end (just before any trailing user message)
           messagesWithInstruction.push({ role: "system", content: charInstruction });
 
-          const genResult = await generateForCharacter(charId, messagesWithInstruction);
+          const genResult = await generateForCharacter(
+            charId,
+            messagesWithInstruction,
+            ci === respondingCharIds.length - 1,
+          );
           if (!genResult) break; // aborted
+          firstSavedMsg ??= genResult.savedMsg;
           lastSavedMsg = genResult.savedMsg;
           allResponses.push(genResult.response);
           for (const cmd of genResult.commands) {
-            collectedCommands.push({ command: cmd, characterId: charId, messageId: genResult.savedMsg?.id ?? "" });
+            collectedCommands.push({
+              command: cmd,
+              characterId: charId,
+              messageId: genResult.savedMsg?.id ?? "",
+              swipeIndex: genResult.savedMsg?.activeSwipeIndex ?? 0,
+            });
           }
           collectedOocMessages.push(...genResult.oocMessages);
 
@@ -6392,14 +6489,16 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
           sentMessages.push({ role: "system", content: charInstruction });
         }
 
-        const genResult = await generateForCharacter(targetCharId, sentMessages);
+        const genResult = await generateForCharacter(targetCharId, sentMessages, true);
         if (genResult) {
+          firstSavedMsg ??= genResult.savedMsg;
           lastSavedMsg = genResult.savedMsg;
           for (const cmd of genResult.commands) {
             collectedCommands.push({
               command: cmd,
               characterId: genResult.characterId,
               messageId: genResult.savedMsg?.id ?? "",
+              swipeIndex: genResult.savedMsg?.activeSwipeIndex ?? 0,
             });
           }
           collectedOocMessages.push(...genResult.oocMessages);
@@ -6423,9 +6522,12 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
       // Persist successful Narrative Director runs.
       // Interval gating uses getLastSuccessfulRunByType("director", …); those rows were
       // never inserted because only post_generation results were saved below. Pre-gen runs
-      // before the assistant message exists — anchor each run to this turn's saved message id.
-      const preGenAnchorMessageId = (lastSavedMsg as any)?.id ?? "";
-      if (preGenAnchorMessageId && !abortController.signal.aborted) {
+      // before the assistant message exists — anchor each run to the first saved
+      // assistant message from this turn so group-chat cadence counts from the
+      // earliest generated response.
+      const preGenAnchorMessageId =
+        (firstSavedMsg as any)?.role === "assistant" ? ((firstSavedMsg as any)?.id ?? "") : "";
+      if (preGenAnchorMessageId && !input.regenerateMessageId && !abortController.signal.aborted) {
         const preGenSuccessful = pipeline.results.filter((r) => {
           if (!r.success || r.agentType !== "director") return false;
           const cfg = pipelineAgents.find((a) => a.type === r.agentType);
@@ -7445,33 +7547,19 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
                         type: "image",
                         url: imageUrl,
                         filename: `illustration.${imageResult.ext}`,
+                        prompt: fullPrompt,
+                        galleryId: (galleryEntry as any)?.id,
                       };
 
                       // Always persist to the swipe row so the attachment survives
                       // swipe switches even if the user has already navigated away.
-                      const swipeRow = (await chats.getSwipes(messageId)).find(
-                        (s: any) => s.index === targetSwipeIndex,
-                      );
-                      if (swipeRow) {
-                        const swipeExtra =
-                          typeof swipeRow.extra === "string" ? JSON.parse(swipeRow.extra) : (swipeRow.extra ?? {});
-                        const swipeAtts = (swipeExtra.attachments as any[]) ?? [];
-                        swipeAtts.push(attachment);
-                        await chats.updateSwipeExtra(messageId, targetSwipeIndex, { attachments: swipeAtts });
-                      }
+                      await chats.appendSwipeAttachment(messageId, targetSwipeIndex, attachment);
 
                       // Also update the live message row if this swipe is still active,
                       // so the SSE illustration event is immediately visible.
                       const msgRow = await chats.getMessage(messageId);
                       if (msgRow && (msgRow.activeSwipeIndex ?? 0) === targetSwipeIndex) {
-                        const msgExtra = msgRow.extra
-                          ? typeof msgRow.extra === "string"
-                            ? JSON.parse(msgRow.extra)
-                            : msgRow.extra
-                          : {};
-                        const existingAttachments = (msgExtra.attachments as any[]) ?? [];
-                        existingAttachments.push(attachment);
-                        await chats.updateMessageExtra(messageId, { attachments: existingAttachments });
+                        await chats.appendMessageAttachment(messageId, attachment);
                       }
                     }
 
@@ -7606,7 +7694,7 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
           data: { count: collectedCommands.length, professorMariCommandCount },
         });
         try {
-          for (const { command, characterId, messageId } of collectedCommands) {
+          for (const { command, characterId, messageId, swipeIndex } of collectedCommands) {
             try {
               if (command.type === "schedule_update") {
                 // ── Schedule Update: modify the character's current schedule block ──
@@ -7862,19 +7950,20 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
                       const filename = filePath.split("/").pop()!;
                       const imageUrl = `/api/gallery/file/${input.chatId}/${encodeURIComponent(filename)}`;
                       if (messageId) {
-                        const msgRow = await chats.getMessage(messageId);
-                        const msgExtra = msgRow?.extra
-                          ? typeof msgRow.extra === "string"
-                            ? JSON.parse(msgRow.extra)
-                            : msgRow.extra
-                          : {};
-                        const existingAttachments = (msgExtra.attachments as any[]) ?? [];
-                        existingAttachments.push({
+                        const generationSwipeIndex = Number.isInteger(swipeIndex) ? swipeIndex : 0;
+                        const attachment = {
                           type: "image",
                           url: imageUrl,
                           filename: `selfie_${charName.toLowerCase().replace(/\s+/g, "_")}.${imageResult.ext}`,
-                        });
-                        await chats.updateMessageExtra(messageId, { attachments: existingAttachments });
+                          prompt: imagePrompt,
+                          galleryId: (galleryEntry as any)?.id,
+                        };
+                        await chats.appendSwipeAttachment(messageId, generationSwipeIndex, attachment);
+
+                        const currentMsgRow = await chats.getMessage(messageId);
+                        if (currentMsgRow && (currentMsgRow.activeSwipeIndex ?? 0) === generationSwipeIndex) {
+                          await chats.appendMessageAttachment(messageId, attachment);
+                        }
                       }
 
                       // Send selfie event to client
@@ -8682,7 +8771,7 @@ This supersedes the 1–3 passive checks budget — prioritise this active check
       if (conversationGenerationStartedAt != null && !conversationAssistantSaved) {
         clearGenerationInProgress(input.chatId, conversationGenerationStartedAt);
       }
-      req.raw.off("close", onClose);
+      reply.raw.off("close", onClose);
       if (activeGenerations) activeGenerations.delete(input.chatId);
       reply.raw.end();
     }

@@ -10,11 +10,20 @@ import {
   type ChatImage,
 } from "../../hooks/use-gallery";
 import { useGalleryStore } from "../../stores/gallery.store";
+import { ImagePromptPanel } from "./ImagePromptPanel";
 
 interface ChatGalleryProps {
   chatId: string;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void;
+}
+
+function formatImageMeta(image: ChatImage) {
+  const details: string[] = [];
+  if (image.model) details.push(image.model);
+  if (image.provider) details.push(image.provider.replace(/_/g, " "));
+  if (image.width && image.height) details.push(`${image.width} x ${image.height}`);
+  return details.join(" | ");
 }
 
 export function ChatGallery({ chatId, onIllustrate }: ChatGalleryProps) {
@@ -25,6 +34,8 @@ export function ChatGallery({ chatId, onIllustrate }: ChatGalleryProps) {
   const [lightbox, setLightbox] = useState<ChatImage | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const pinImage = useGalleryStore((s) => s.pinImage);
+  const lightboxPrompt = lightbox?.prompt.trim() ?? "";
+  const lightboxMeta = lightbox ? formatImageMeta(lightbox) : "";
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const input = e.currentTarget;
@@ -162,44 +173,54 @@ export function ChatGallery({ chatId, onIllustrate }: ChatGalleryProps) {
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 max-md:pt-[env(safe-area-inset-top)]"
           onClick={() => setLightbox(null)}
         >
-          <div className="relative max-h-[90vh] max-w-[90vw] w-[min(90vw,90vh)]" onClick={(e) => e.stopPropagation()}>
-            <img
-              src={lightbox.url}
-              alt={lightbox.prompt || "Gallery image"}
-              decoding="async"
-              className="max-h-[85vh] w-full rounded-lg object-contain shadow-2xl"
-            />
-            {/* Controls */}
-            <div className="absolute right-2 top-2 flex gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  pinImage(lightbox);
-                  setLightbox(null);
-                }}
-                aria-label="Pin image to chat"
-                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
-                title="Pin to chat"
-              >
-                <Minimize2 size="0.875rem" />
-              </button>
-              <a
-                href={lightbox.url}
-                download
-                aria-label="Download image"
-                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
-              >
-                <Download size="0.875rem" />
-              </a>
-              <button
-                type="button"
-                onClick={() => setLightbox(null)}
-                aria-label="Close image"
-                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
-              >
-                <X size="0.875rem" />
-              </button>
+          <div
+            className="flex max-h-[90vh] w-[min(90vw,64rem)] max-w-[90vw] flex-col items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="relative flex min-h-0 max-w-full justify-center">
+              <img
+                src={lightbox.url}
+                alt={lightbox.prompt || "Gallery image"}
+                decoding="async"
+                className={
+                  lightboxPrompt || lightboxMeta
+                    ? "max-h-[calc(90vh-10rem)] max-w-full rounded-lg object-contain shadow-2xl"
+                    : "max-h-[85vh] max-w-full rounded-lg object-contain shadow-2xl"
+                }
+              />
+              {/* Controls */}
+              <div className="absolute right-2 top-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    pinImage(lightbox);
+                    setLightbox(null);
+                  }}
+                  aria-label="Pin image to chat"
+                  className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
+                  title="Pin to chat"
+                >
+                  <Minimize2 size="0.875rem" />
+                </button>
+                <a
+                  href={lightbox.url}
+                  download
+                  aria-label="Download image"
+                  className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
+                >
+                  <Download size="0.875rem" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLightbox(null)}
+                  aria-label="Close image"
+                  className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
+                >
+                  <X size="0.875rem" />
+                </button>
+              </div>
             </div>
+            <ImagePromptPanel prompt={lightboxPrompt} meta={lightboxMeta} className="w-full max-w-3xl" />
           </div>
         </div>
       )}

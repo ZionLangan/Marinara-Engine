@@ -7,6 +7,7 @@ import { useUpdateMessageExtra } from "../../hooks/use-chats";
 import { useAgentStore } from "../../stores/agent.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useChatStore } from "../../stores/chat.store";
+import { useUIStore } from "../../stores/ui.store";
 import type { Message } from "@marinara-engine/shared";
 
 type SkillCheckMeta = {
@@ -46,6 +47,7 @@ export function CyoaChoices({ messages }: Props) {
   const { generate, retryAgents } = useGenerate();
   const activeChatId = useChatStore((s) => s.activeChatId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const impersonateCyoaChoices = useUIStore((s) => s.impersonateCyoaChoices);
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
   const [isEditing, setIsEditing] = useState(false);
   const [isRerolling, setIsRerolling] = useState(false);
@@ -108,6 +110,23 @@ export function CyoaChoices({ messages }: Props) {
     async (choice: CyoaChoice) => {
       if (!activeChatId || isStreaming || isEditing) return;
       clearCyoaChoices();
+      if (impersonateCyoaChoices) {
+        const { impersonatePresetId, impersonateConnectionId, impersonateBlockAgents, impersonatePromptTemplate } =
+          useUIStore.getState();
+        const trimmedPromptTemplate = impersonatePromptTemplate.trim();
+        await generate({
+          chatId: activeChatId,
+          connectionId: null,
+          impersonate: true,
+          userMessage: text,
+          ...(impersonatePresetId ? { impersonatePresetId } : {}),
+          ...(impersonateConnectionId ? { impersonateConnectionId } : {}),
+          ...(impersonateBlockAgents ? { impersonateBlockAgents: true } : {}),
+          ...(trimmedPromptTemplate ? { impersonatePromptTemplate: trimmedPromptTemplate } : {}),
+        });
+        return;
+      }
+
       await generate({
         chatId: activeChatId,
         connectionId: null,
@@ -118,7 +137,7 @@ export function CyoaChoices({ messages }: Props) {
             : undefined,
       });
     },
-    [activeChatId, isStreaming, isEditing, clearCyoaChoices, generate],
+    [activeChatId, isStreaming, isEditing, impersonateCyoaChoices, clearCyoaChoices, generate],
   );
 
   const handleReroll = useCallback(async () => {
@@ -175,6 +194,11 @@ export function CyoaChoices({ messages }: Props) {
           <Sparkles size="0.625rem" />
           <span>What will you do?</span>
         </div>
+        {impersonateCyoaChoices && (
+          <span className="rounded-full border border-purple-400/20 bg-purple-500/10 px-1.5 py-0.5 text-[0.5625rem] font-semibold text-purple-700 dark:text-purple-200">
+            Impersonate
+          </span>
+        )}
         <button
           type="button"
           onClick={isEditing ? handleCancelEdit : handleStartEdit}

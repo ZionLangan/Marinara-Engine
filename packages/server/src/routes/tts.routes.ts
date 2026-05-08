@@ -417,7 +417,11 @@ async function fetchElevenLabsVoiceOptions(
     const res = await safeFetch(url, {
       headers: elevenLabsHeaders(apiKey),
       signal: AbortSignal.timeout(10_000),
-      policy: { allowLocal: isTtsLocalUrlsEnabled(), allowedProtocols: ["https:", "http:"] },
+      policy: {
+        allowLocal: isTtsLocalUrlsEnabled(),
+        allowedProtocols: ["https:", "http:"],
+        flagName: "TTS_LOCAL_URLS_ENABLED",
+      },
       maxResponseBytes: 2 * 1024 * 1024,
     });
 
@@ -466,7 +470,11 @@ async function fetchProviderVoices(cfg: TTSConfig): Promise<TTSVoicesResponse> {
   const res = await safeFetch(`${base}/audio/voices`, {
     headers: openAiHeaders(cfg.apiKey),
     signal: AbortSignal.timeout(10_000),
-    policy: { allowLocal: allowLocalTtsUrl(cfg), allowedProtocols: ["https:", "http:"] },
+    policy: {
+      allowLocal: allowLocalTtsUrl(cfg),
+      allowedProtocols: ["https:", "http:"],
+      flagName: "TTS_LOCAL_URLS_ENABLED",
+    },
     maxResponseBytes: 2 * 1024 * 1024,
   });
 
@@ -629,13 +637,18 @@ export async function ttsRoutes(app: FastifyInstance) {
                   ...(speechInstructions ? { instructions: speechInstructions } : {}),
                 }),
         signal: AbortSignal.timeout(60_000),
-        policy: { allowLocal: allowLocalTtsUrl(cfg), allowedProtocols: ["https:", "http:"] },
+        policy: {
+      allowLocal: allowLocalTtsUrl(cfg),
+      allowedProtocols: ["https:", "http:"],
+      flagName: "TTS_LOCAL_URLS_ENABLED",
+    },
         maxResponseBytes: MAX_TTS_AUDIO_BYTES,
         allowedContentTypes: ["audio/", "application/octet-stream"],
       });
     } catch (err: unknown) {
       const msg =
         err instanceof Error && err.name === "TimeoutError" ? "TTS request timed out" : "TTS provider unreachable";
+      req.log.error(err, "TTS provider request failed");
       return reply.status(502).send({ error: msg });
     }
 

@@ -5,12 +5,47 @@ import {
   buildDefaultAgentConnectionWarning,
   buildLocalSidecarUnavailableWarning,
   isLocalSidecarConnectionId,
+  resolveAgentConnectionId,
 } from "../src/routes/generate/agent-connection-guards.js";
 
 test("detects explicit Local Model connection ids", () => {
+  assert.equal(LOCAL_SIDECAR_CONNECTION_ID, "__local_sidecar__");
   assert.equal(isLocalSidecarConnectionId(LOCAL_SIDECAR_CONNECTION_ID), true);
   assert.equal(isLocalSidecarConnectionId("regular-connection"), false);
   assert.equal(isLocalSidecarConnectionId(null), false);
+});
+
+test("falls back to the default agent connection when Local Model is unavailable", () => {
+  assert.equal(
+    resolveAgentConnectionId({
+      requestedConnectionId: LOCAL_SIDECAR_CONNECTION_ID,
+      defaultAgentConnectionId: "paid-agent-default",
+      localSidecarAvailable: false,
+    }),
+    "paid-agent-default",
+  );
+});
+
+test("skips Local Model agents only when no default agent fallback is configured", () => {
+  assert.equal(
+    resolveAgentConnectionId({
+      requestedConnectionId: LOCAL_SIDECAR_CONNECTION_ID,
+      defaultAgentConnectionId: null,
+      localSidecarAvailable: false,
+    }),
+    "skip-local-sidecar",
+  );
+});
+
+test("keeps Local Model when the sidecar is available", () => {
+  assert.equal(
+    resolveAgentConnectionId({
+      requestedConnectionId: LOCAL_SIDECAR_CONNECTION_ID,
+      defaultAgentConnectionId: "paid-agent-default",
+      localSidecarAvailable: true,
+    }),
+    LOCAL_SIDECAR_CONNECTION_ID,
+  );
 });
 
 test("builds a user-visible warning for skipped local-only agents", () => {

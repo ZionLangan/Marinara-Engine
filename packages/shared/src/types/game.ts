@@ -2,7 +2,7 @@
 // Game Mode Types
 // ──────────────────────────────────────────────
 import type { GenerationParameters } from "./prompt.js";
-import type { CombatItemEffect } from "./combat-encounter.js";
+import type { CombatItemEffect, CombatMechanic, CombatDialogueCue } from "./combat-encounter.js";
 
 /** The four main states a game can be in during a session. */
 export type GameActiveState = "exploration" | "dialogue" | "combat" | "travel_rest";
@@ -327,6 +327,23 @@ export type CombatPlayerAction =
     }
   | { type: "defend" }
   | { type: "flee" };
+
+/**
+ * Snapshot of an in-progress combat encounter, persisted to chat metadata so a
+ * page refresh during a fight restores the live party/enemy state instead of
+ * dropping back into prose narration. Internal GameCombatUI state (round
+ * number, action queue, animation phase) is intentionally NOT persisted —
+ * those resume from the start of the round on restore.
+ */
+export interface GameCombatStateSnapshot {
+  party: Combatant[];
+  enemies: Combatant[];
+  itemEffects: CombatItemEffect[];
+  mechanics: CombatMechanic[];
+  dialogueCues: CombatDialogueCue[];
+  /** ID of the assistant message whose `[combat:]` tag opened this encounter. */
+  startMessageId: string | null;
+}
 
 /** Post-combat summary handed to the GM for narration. */
 export interface CombatSummary {

@@ -14,6 +14,18 @@ export function isLocalSidecarConnectionId(connectionId: unknown): boolean {
   return connectionId === LOCAL_SIDECAR_CONNECTION_ID;
 }
 
+export function resolveAgentConnectionId(args: {
+  requestedConnectionId: string | null | undefined;
+  defaultAgentConnectionId: string | null | undefined;
+  localSidecarAvailable: boolean;
+}): string | null | "skip-local-sidecar" {
+  if (isLocalSidecarConnectionId(args.requestedConnectionId) && !args.localSidecarAvailable) {
+    return args.defaultAgentConnectionId ?? "skip-local-sidecar";
+  }
+
+  return args.requestedConnectionId ?? args.defaultAgentConnectionId ?? null;
+}
+
 function formatAgentNameList(agentNames: string[]): string {
   if (agentNames.length === 0) return "Agent";
   if (agentNames.length === 1) return agentNames[0]!;

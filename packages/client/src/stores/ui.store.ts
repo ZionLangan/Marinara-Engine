@@ -84,16 +84,20 @@ export interface CustomTheme {
   installedAt: string;
 }
 
-/** A user-installed extension (JS/CSS) */
-export interface InstalledExtension {
+/**
+ * Pre-migration shape of a browser-local extension. Only used to read
+ * existing localStorage state and replay it against the server
+ * (`/api/extensions`) on first load — see `useLegacyExtensionMigration`.
+ * New extensions go directly through the server-synced hooks in
+ * `use-extensions.ts` and use the canonical `InstalledExtension` type
+ * exported from `@marinara-engine/shared`.
+ */
+export interface LegacyInstalledExtension {
   id: string;
   name: string;
   description: string;
-  /** CSS to inject */
   css?: string;
-  /** JavaScript to execute */
   js?: string;
-  /** Whether the extension is enabled */
   enabled: boolean;
   installedAt: string;
 }
@@ -245,7 +249,10 @@ interface UIState {
   customThemes: CustomTheme[];
   /** True once legacy browser-local themes have been migrated to the server. */
   hasMigratedCustomThemesToServer: boolean;
-  installedExtensions: InstalledExtension[];
+  /** Legacy browser-local extensions. Migration only — see useLegacyExtensionMigration. */
+  installedExtensions: LegacyInstalledExtension[];
+  /** True once legacy browser-local extensions have been migrated to the server. */
+  hasMigratedExtensionsToServer: boolean;
 
   // ── Onboarding ──
   hasCompletedOnboarding: boolean;
@@ -266,6 +273,20 @@ interface UIState {
   userStatus: UserStatus;
   /** Optional short activity shown with the user's status in Conversation mode. */
   userActivity: string;
+
+  // ── Impersonate Settings ──
+  /** Custom prompt template for /impersonate (empty = use server default). Persisted. */
+  impersonatePromptTemplate: string;
+  /** Show a quick /impersonate button in the chat input toolbar. Persisted. */
+  impersonateShowQuickButton: boolean;
+  /** When true, CYOA choices generate impersonate requests instead of normal user messages. Persisted. */
+  impersonateCyoaChoices: boolean;
+  /** Override preset used when impersonating (null = use chat default). Persisted. */
+  impersonatePresetId: string | null;
+  /** Override connection used when impersonating (null = use chat default). Persisted. */
+  impersonateConnectionId: string | null;
+  /** When true, suppress agent pipeline during impersonate. Persisted. */
+  impersonateBlockAgents: boolean;
 
   /** Transient: true when center content area is too narrow (overflow detected) */
   centerCompact: boolean;
@@ -363,6 +384,15 @@ interface UIState {
   setEnterToSendGame: (v: boolean) => void;
   setWeatherEffects: (v: boolean) => void;
   setHudPosition: (v: HudPosition) => void;
+
+  // Impersonate settings actions
+  setImpersonatePromptTemplate: (v: string) => void;
+  setImpersonateShowQuickButton: (v: boolean) => void;
+  setImpersonateCyoaChoices: (v: boolean) => void;
+  setImpersonatePresetId: (id: string | null) => void;
+  setImpersonateConnectionId: (id: string | null) => void;
+  setImpersonateBlockAgents: (v: boolean) => void;
+
   /** Legacy migration helpers for browser-local custom themes. */
   setHasMigratedCustomThemesToServer: (v: boolean) => void;
   clearLegacyCustomThemes: () => void;
@@ -370,9 +400,9 @@ interface UIState {
   addCustomTheme: (theme: CustomTheme) => void;
   updateCustomTheme: (id: string, patch: Partial<Pick<CustomTheme, "name" | "css">>) => void;
   removeCustomTheme: (id: string) => void;
-  addExtension: (ext: InstalledExtension) => void;
-  removeExtension: (id: string) => void;
-  toggleExtension: (id: string) => void;
+  /** Legacy migration helpers for browser-local extensions. */
+  setHasMigratedExtensionsToServer: (v: boolean) => void;
+  clearLegacyExtensions: () => void;
   setHasCompletedOnboarding: (v: boolean) => void;
   setGameTutorialDisabled: (v: boolean) => void;
   dismissLinkApiBanner: () => void;
@@ -451,6 +481,12 @@ export function pickSyncedSettings(state: UIState) {
     rpNotificationSound: state.rpNotificationSound,
     customConversationPrompt: state.customConversationPrompt,
     scheduleGenerationPreferences: state.scheduleGenerationPreferences,
+    impersonatePromptTemplate: state.impersonatePromptTemplate,
+    impersonateShowQuickButton: state.impersonateShowQuickButton,
+    impersonateCyoaChoices: state.impersonateCyoaChoices,
+    impersonatePresetId: state.impersonatePresetId,
+    impersonateConnectionId: state.impersonateConnectionId,
+    impersonateBlockAgents: state.impersonateBlockAgents,
     learnedGameSetupOptions: state.learnedGameSetupOptions,
   };
 }
@@ -542,6 +578,7 @@ export const useUIStore = create<UIState>()(
       customThemes: [],
       hasMigratedCustomThemesToServer: false,
       installedExtensions: [],
+      hasMigratedExtensionsToServer: false,
       hasCompletedOnboarding: false,
       gameTutorialDisabled: false,
       linkApiBannerDismissed: false,
@@ -551,6 +588,14 @@ export const useUIStore = create<UIState>()(
       userStatus: "active" as UserStatus,
       userActivity: "",
       centerCompact: false,
+
+      // Impersonate settings defaults
+      impersonatePromptTemplate: "",
+      impersonateShowQuickButton: false,
+      impersonateCyoaChoices: false,
+      impersonatePresetId: null,
+      impersonateConnectionId: null,
+      impersonateBlockAgents: false,
 
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
@@ -824,6 +869,12 @@ export const useUIStore = create<UIState>()(
       setEnterToSendGame: (v) => set({ enterToSendGame: v }),
       setWeatherEffects: (v) => set({ weatherEffects: v }),
       setHudPosition: (v) => set({ hudPosition: v }),
+      setImpersonatePromptTemplate: (v) => set({ impersonatePromptTemplate: v }),
+      setImpersonateShowQuickButton: (v) => set({ impersonateShowQuickButton: v }),
+      setImpersonateCyoaChoices: (v) => set({ impersonateCyoaChoices: v }),
+      setImpersonatePresetId: (id) => set({ impersonatePresetId: id }),
+      setImpersonateConnectionId: (id) => set({ impersonateConnectionId: id }),
+      setImpersonateBlockAgents: (v) => set({ impersonateBlockAgents: v }),
       setHasMigratedCustomThemesToServer: (v) => set({ hasMigratedCustomThemesToServer: v }),
       clearLegacyCustomThemes: () => set({ customThemes: [], activeCustomTheme: null }),
       setActiveCustomTheme: (id) => set({ activeCustomTheme: id }),
@@ -837,15 +888,8 @@ export const useUIStore = create<UIState>()(
           customThemes: s.customThemes.filter((t) => t.id !== id),
           activeCustomTheme: s.activeCustomTheme === id ? null : s.activeCustomTheme,
         })),
-      addExtension: (ext) => set((s) => ({ installedExtensions: [...s.installedExtensions, ext] })),
-      removeExtension: (id) =>
-        set((s) => ({
-          installedExtensions: s.installedExtensions.filter((e) => e.id !== id),
-        })),
-      toggleExtension: (id) =>
-        set((s) => ({
-          installedExtensions: s.installedExtensions.map((e) => (e.id === id ? { ...e, enabled: !e.enabled } : e)),
-        })),
+      setHasMigratedExtensionsToServer: (v) => set({ hasMigratedExtensionsToServer: v }),
+      clearLegacyExtensions: () => set({ installedExtensions: [] }),
       setHasCompletedOnboarding: (v) => set({ hasCompletedOnboarding: v }),
       setGameTutorialDisabled: (v) => set({ gameTutorialDisabled: v }),
       dismissLinkApiBanner: () => set({ linkApiBannerDismissed: true }),
@@ -857,7 +901,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 17,
+      version: 19,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1006,8 +1050,13 @@ export const useUIStore = create<UIState>()(
             persisted.learnedGameSetupOptions = DEFAULT_GAME_SETUP_LEARNED_OPTIONS;
           }
         }
-        // v15 -> v16: opt-in output cleanup for incomplete final sentences.
+        // v15 -> v16: add impersonate settings and opt-in output cleanup for incomplete final sentences.
         if (version <= 15) {
+          if (persisted.impersonatePromptTemplate === undefined) persisted.impersonatePromptTemplate = "";
+          if (persisted.impersonateShowQuickButton === undefined) persisted.impersonateShowQuickButton = false;
+          if (persisted.impersonatePresetId === undefined) persisted.impersonatePresetId = null;
+          if (persisted.impersonateConnectionId === undefined) persisted.impersonateConnectionId = null;
+          if (persisted.impersonateBlockAgents === undefined) persisted.impersonateBlockAgents = false;
           if (persisted.trimIncompleteModelOutput === undefined) {
             persisted.trimIncompleteModelOutput = false;
           }
@@ -1020,6 +1069,16 @@ export const useUIStore = create<UIState>()(
           if (persisted.intuitiveSwipeRerollLatest === undefined) {
             persisted.intuitiveSwipeRerollLatest = false;
           }
+        }
+        // v17 -> v18: add legacy extension migration completion flag.
+        if (version <= 17) {
+          if (persisted.hasMigratedExtensionsToServer === undefined) {
+            persisted.hasMigratedExtensionsToServer = false;
+          }
+        }
+        // v18 -> v19: let CYOA choices opt into impersonate generation.
+        if (version <= 18) {
+          if (persisted.impersonateCyoaChoices === undefined) persisted.impersonateCyoaChoices = false;
         }
         return persisted;
       },
@@ -1081,6 +1140,7 @@ export const useUIStore = create<UIState>()(
         activeCustomTheme: state.activeCustomTheme,
         customThemes: state.customThemes,
         installedExtensions: state.installedExtensions,
+        hasMigratedExtensionsToServer: state.hasMigratedExtensionsToServer,
         hasCompletedOnboarding: state.hasCompletedOnboarding,
         linkApiBannerDismissed: state.linkApiBannerDismissed,
         echoChamberSide: state.echoChamberSide,
@@ -1091,6 +1151,12 @@ export const useUIStore = create<UIState>()(
         rpNotificationSound: state.rpNotificationSound,
         customConversationPrompt: state.customConversationPrompt,
         scheduleGenerationPreferences: state.scheduleGenerationPreferences,
+        impersonatePromptTemplate: state.impersonatePromptTemplate,
+        impersonateShowQuickButton: state.impersonateShowQuickButton,
+        impersonateCyoaChoices: state.impersonateCyoaChoices,
+        impersonatePresetId: state.impersonatePresetId,
+        impersonateConnectionId: state.impersonateConnectionId,
+        impersonateBlockAgents: state.impersonateBlockAgents,
         learnedGameSetupOptions: state.learnedGameSetupOptions,
       }),
     },

@@ -58,6 +58,12 @@ export const generateRequestSchema = z.object({
     .nullable()
     .optional()
     .default(null),
+
+  // Impersonate overrides (applied only when impersonate=true)
+  impersonatePresetId: z.string().nullish(),
+  impersonateConnectionId: z.string().nullish(),
+  impersonateBlockAgents: z.boolean().optional().default(false),
+  impersonatePromptTemplate: z.string().optional(),
 });
 
 // Auto-summarization entries — shape-only validation (no length caps).

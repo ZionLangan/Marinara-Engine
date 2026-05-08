@@ -205,8 +205,12 @@ interface GameNarrationProps {
   restoredSegmentIndex?: number;
   /** Called when the active segment index changes (for persistence) */
   onSegmentChange?: (index: number) => void;
-  /** Called when narration is fully complete (all segments read, not streaming) */
-  onNarrationComplete?: (complete: boolean) => void;
+  /**
+   * Called when narration is fully complete (all segments read, not streaming).
+   * `messageId` identifies which assistant message the completion refers to so the
+   * caller can guard against stale narrationDone leaking from the previous turn.
+   */
+  onNarrationComplete?: (complete: boolean, messageId: string | null) => void;
   /** Slot rendered above the narration box (used for mobile widget icons) */
   widgetSlot?: ReactNode;
   /** Slot rendered above the narration box for GM choice cards */
@@ -1482,10 +1486,13 @@ export function GameNarration({
   // Notify parent about narration completion state. While reviewing the past via
   // wheel-nav, the past message will look "complete" — but it's not the present, so
   // suppress the notification to keep the parent's narrationDone state honest.
+  // Pass the active segment's source message ID so the parent can tell which message's
+  // typewriter the completion refers to (otherwise stale "done" from the previous turn
+  // can leak across to the new turn before this effect re-runs to push false).
   useEffect(() => {
     if (messageOffset > 0) return;
-    onNarrationComplete?.(narrationComplete);
-  }, [messageOffset, narrationComplete, onNarrationComplete]);
+    onNarrationComplete?.(narrationComplete, activeSourceMessageId);
+  }, [messageOffset, narrationComplete, activeSourceMessageId, onNarrationComplete]);
 
   // Build log entries from the LAST scene — includes party chat & player action.
   // Entries are stored chronologically (oldest first, newest last).

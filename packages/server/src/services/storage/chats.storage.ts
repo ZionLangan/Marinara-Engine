@@ -12,6 +12,7 @@ import {
   conversationNotes,
   agentRuns,
   agentMemory,
+  memoryChunks,
 } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 import { existsSync, rmSync } from "fs";
@@ -33,23 +34,33 @@ export type MetadataPatch = Record<string, unknown>;
 export type MetadataUpdater = (current: MetadataPatch) => MetadataPatch | Promise<MetadataPatch>;
 
 const metadataPatchQueues = new Map<string, Promise<void>>();
+const messageExtraPatchQueues = new Map<string, Promise<void>>();
+const swipeExtraPatchQueues = new Map<string, Promise<void>>();
 
-async function withMetadataPatchQueue<T>(chatId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = metadataPatchQueues.get(chatId) ?? Promise.resolve();
+async function withPatchQueue<T>(
+  queues: Map<string, Promise<void>>,
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = queues.get(key) ?? Promise.resolve();
   const queued = previous.catch(() => undefined).then(operation);
   const queuedVoid = queued.then(
     () => undefined,
     () => undefined,
   );
-  metadataPatchQueues.set(chatId, queuedVoid);
+  queues.set(key, queuedVoid);
 
   try {
     return await queued;
   } finally {
-    if (metadataPatchQueues.get(chatId) === queuedVoid) {
-      metadataPatchQueues.delete(chatId);
+    if (queues.get(key) === queuedVoid) {
+      queues.delete(key);
     }
   }
+}
+
+async function withMetadataPatchQueue<T>(chatId: string, operation: () => Promise<T>): Promise<T> {
+  return withPatchQueue(metadataPatchQueues, chatId, operation);
 }
 
 function parseMetadata(raw: unknown): MetadataPatch {
@@ -90,6 +101,15 @@ function parseMessageCursor(before?: string): { createdAt: string; rowid: number
     createdAt: before.slice(0, separatorIndex),
     rowid,
   };
+}
+
+async function invalidateMemoryChunksFrom(db: DB, chatId: string, createdAt: string) {
+  await db
+    .delete(memoryChunks)
+    .where(and(eq(memoryChunks.chatId, chatId), gt(memoryChunks.lastMessageAt, createdAt)));
+  await db
+    .delete(memoryChunks)
+    .where(and(eq(memoryChunks.chatId, chatId), eq(memoryChunks.lastMessageAt, createdAt)));
 }
 
 /** Create the chat storage facade used by routes and importers. */
@@ -200,6 +220,24 @@ export function createChatsStorage(db: DB) {
           .where(eq(chats.id, id));
         return this.getById(id);
       });
+    },
+
+    async removeLorebookFromChatMetadata(lorebookId: string) {
+      const allChats = await this.list();
+      for (const chat of allChats) {
+        const metadata = parseMetadata(chat.metadata);
+        if (!Array.isArray(metadata.activeLorebookIds)) continue;
+
+        const nextActiveLorebookIds = metadata.activeLorebookIds.filter((id) => id !== lorebookId);
+        if (nextActiveLorebookIds.length === metadata.activeLorebookIds.length) continue;
+
+        await this.patchMetadata(chat.id, (current) => {
+          const currentLorebookIds = Array.isArray(current.activeLorebookIds) ? current.activeLorebookIds : [];
+          return {
+            activeLorebookIds: currentLorebookIds.filter((id) => id !== lorebookId),
+          };
+        });
+      }
     },
 
     async remove(id: string) {
@@ -427,7 +465,11 @@ export function createChatsStorage(db: DB) {
     },
 
     async updateMessageContent(id: string, content: string) {
+      const existing = await this.getMessage(id);
       await db.update(messages).set({ content }).where(eq(messages.id, id));
+      if (existing) {
+        await invalidateMemoryChunksFrom(db, existing.chatId, existing.createdAt);
+      }
       // Also sync the edit to the active swipe row so it persists across swipe switches
       const msg = await this.getMessage(id);
       if (msg) {
@@ -442,30 +484,64 @@ export function createChatsStorage(db: DB) {
 
     /** Merge partial data into a message's extra JSON field. */
     async updateMessageExtra(id: string, partial: Record<string, unknown>) {
-      const msg = await this.getMessage(id);
-      if (!msg) return null;
-      const existing = typeof msg.extra === "string" ? JSON.parse(msg.extra) : (msg.extra ?? {});
-      const merged = { ...existing, ...partial };
-      await db
-        .update(messages)
-        .set({ extra: JSON.stringify(merged) })
-        .where(eq(messages.id, id));
-      return this.getMessage(id);
+      return withPatchQueue(messageExtraPatchQueues, id, async () => {
+        const msg = await this.getMessage(id);
+        if (!msg) return null;
+        const existing = typeof msg.extra === "string" ? JSON.parse(msg.extra) : (msg.extra ?? {});
+        const merged = { ...existing, ...partial };
+        await db
+          .update(messages)
+          .set({ extra: JSON.stringify(merged) })
+          .where(eq(messages.id, id));
+        return this.getMessage(id);
+      });
+    },
+
+    /** Atomically append an attachment to a message's extra JSON field. */
+    async appendMessageAttachment(id: string, attachment: Record<string, unknown>) {
+      return withPatchQueue(messageExtraPatchQueues, id, async () => {
+        const msg = await this.getMessage(id);
+        if (!msg) return null;
+        const existing = typeof msg.extra === "string" ? JSON.parse(msg.extra) : (msg.extra ?? {});
+        const attachments = Array.isArray(existing.attachments) ? existing.attachments : [];
+        const merged = { ...existing, attachments: [...attachments, attachment] };
+        await db
+          .update(messages)
+          .set({ extra: JSON.stringify(merged) })
+          .where(eq(messages.id, id));
+        return this.getMessage(id);
+      });
     },
 
     async removeMessage(id: string) {
+      const existing = await this.getMessage(id);
       await db.delete(messages).where(eq(messages.id, id));
+      if (existing) {
+        await invalidateMemoryChunksFrom(db, existing.chatId, existing.createdAt);
+      }
     },
 
     async removeMessages(ids: string[], chatId?: string) {
       if (ids.length === 0) return;
+      const earliestByChat = new Map<string, string>();
       const CHUNK = 500;
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const condition = chatId
           ? and(inArray(messages.id, chunk), eq(messages.chatId, chatId))
           : inArray(messages.id, chunk);
+        const existingRows = await db
+          .select({ chatId: messages.chatId, createdAt: messages.createdAt })
+          .from(messages)
+          .where(condition);
+        for (const row of existingRows) {
+          const current = earliestByChat.get(row.chatId);
+          if (!current || row.createdAt < current) earliestByChat.set(row.chatId, row.createdAt);
+        }
         await db.delete(messages).where(condition);
+      }
+      for (const [affectedChatId, createdAt] of earliestByChat) {
+        await invalidateMemoryChunksFrom(db, affectedChatId, createdAt);
       }
     },
 
@@ -605,15 +681,33 @@ export function createChatsStorage(db: DB) {
 
     /** Merge partial data into a swipe's extra JSON field. */
     async updateSwipeExtra(messageId: string, swipeIndex: number, partial: Record<string, unknown>) {
-      const swipes = await this.getSwipes(messageId);
-      const target = swipes.find((s: any) => s.index === swipeIndex);
-      if (!target) return;
-      const existing = typeof target.extra === "string" ? JSON.parse(target.extra) : (target.extra ?? {});
-      const merged = { ...existing, ...partial };
-      await db
-        .update(messageSwipes)
-        .set({ extra: JSON.stringify(merged) })
-        .where(eq(messageSwipes.id, target.id));
+      return withPatchQueue(swipeExtraPatchQueues, `${messageId}:${swipeIndex}`, async () => {
+        const swipes = await this.getSwipes(messageId);
+        const target = swipes.find((s: any) => s.index === swipeIndex);
+        if (!target) return;
+        const existing = typeof target.extra === "string" ? JSON.parse(target.extra) : (target.extra ?? {});
+        const merged = { ...existing, ...partial };
+        await db
+          .update(messageSwipes)
+          .set({ extra: JSON.stringify(merged) })
+          .where(eq(messageSwipes.id, target.id));
+      });
+    },
+
+    /** Atomically append an attachment to a swipe's extra JSON field. */
+    async appendSwipeAttachment(messageId: string, swipeIndex: number, attachment: Record<string, unknown>) {
+      return withPatchQueue(swipeExtraPatchQueues, `${messageId}:${swipeIndex}`, async () => {
+        const swipes = await this.getSwipes(messageId);
+        const target = swipes.find((s: any) => s.index === swipeIndex);
+        if (!target) return;
+        const existing = typeof target.extra === "string" ? JSON.parse(target.extra) : (target.extra ?? {});
+        const attachments = Array.isArray(existing.attachments) ? existing.attachments : [];
+        const merged = { ...existing, attachments: [...attachments, attachment] };
+        await db
+          .update(messageSwipes)
+          .set({ extra: JSON.stringify(merged) })
+          .where(eq(messageSwipes.id, target.id));
+      });
     },
 
     // ── Chat Connections ──

@@ -102,6 +102,15 @@ function hasNamePrefixFormat(msg: Message, characterMap: CharacterMap, chatChara
   return false;
 }
 
+function isHiddenFromUser(message: Message) {
+  try {
+    const extra = typeof message.extra === "string" ? JSON.parse(message.extra) : (message.extra ?? {});
+    return extra.hiddenFromUser === true;
+  } catch {
+    return false;
+  }
+}
+
 // Module-level set that remembers which message keys have been "seen" across
 // component remounts. This prevents stagger animations and notification sounds
 // from replaying when the user navigates away from a chat and comes back.
@@ -153,6 +162,16 @@ export function ConversationView({
   const streamingCharacterId = useChatStore((s) => s.streamingCharacterId);
   const typingCharacterName = useChatStore((s) => s.typingCharacterName);
   const delayedCharacterInfo = useChatStore((s) => s.delayedCharacterInfo);
+  const liveTypingName = useMemo(() => {
+    if (typingCharacterName) return typingCharacterName;
+    if (streamingCharacterId) return characterMap.get(streamingCharacterId)?.name ?? "Character";
+    if (chatCharIds.length === 1) return characterMap.get(chatCharIds[0]!)?.name ?? "Character";
+    if (characterNames.length > 0) return characterNames.join(", ");
+    return "Character";
+  }, [characterMap, characterNames, chatCharIds, streamingCharacterId, typingCharacterName]);
+  const liveTypingVerb = liveTypingName.includes(",") || liveTypingName.includes(" & ") ? "are" : "is";
+  const showTypingIndicator =
+    isStreaming && !delayedCharacterInfo && (!regenerateMessageId || (!streamBuffer && !thinkingBuffer));
 
   // ── Periodic status refresh (every 60s) ──
   // Keeps status dots in sync with the character's schedule regardless of autonomous messaging
@@ -168,6 +187,7 @@ export function ConversationView({
         /* non-critical */
       }
     };
+    void refreshStatus();
     const timer = setInterval(refreshStatus, 60_000);
     return () => clearInterval(timer);
   }, [chatId, qc]);
@@ -287,6 +307,7 @@ export function ConversationView({
     let lastDay = "";
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i]!;
+      if (isHiddenFromUser(msg)) continue;
       const day = getDayKey(msg.createdAt);
       if (day !== lastDay) {
         items.push({ type: "separator", key: `sep-${day}`, label: formatDaySeparator(msg.createdAt) });
@@ -415,7 +436,7 @@ export function ConversationView({
     setHiddenLineKeys(new Set());
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const currentKeys = new Set(renderedItems.filter((i) => i.type === "message").map((i) => i.key));
 
     // On the very first render that has messages, just snapshot the keys and
@@ -828,7 +849,7 @@ export function ConversationView({
         )}
 
         {/* Typing indicator — shown when generation is actively running */}
-        {isStreaming && !streamBuffer && !thinkingBuffer && typingCharacterName && (
+        {showTypingIndicator && (
           <div className="flex items-center gap-2 px-4 py-1.5 text-[0.8125rem] text-[var(--text-secondary)]">
             <span className="flex gap-0.5">
               <span
@@ -844,34 +865,10 @@ export function ConversationView({
                 style={{ animationDelay: "300ms" }}
               />
             </span>
-            <span className="italic">{typingCharacterName} is typing...</span>
+            <span className="italic">
+              {liveTypingName} {liveTypingVerb} typing...
+            </span>
           </div>
-        )}
-
-        {/* Streaming message — only shown once actual content starts arriving */}
-        {isStreaming && !regenerateMessageId && (streamBuffer || thinkingBuffer) && (
-          <ConversationMessage
-            message={{
-              id: "__streaming__",
-              chatId,
-              role: "assistant",
-              characterId: streamingCharacterId ?? chatCharIds[0] ?? null,
-              content: streamBuffer || "Thinking...",
-              activeSwipeIndex: 0,
-              extra: {
-                displayText: null,
-                isGenerated: true,
-                tokenCount: 0,
-                generationInfo: null,
-                thinking: thinkingBuffer || null,
-              },
-              createdAt: new Date().toISOString(),
-            }}
-            isStreaming
-            characterMap={characterMap}
-            personaInfo={personaInfo as any}
-            chatCharacterIds={chatCharIds}
-          />
         )}
 
         {/* Scene banner — inline at bottom of messages (origin variant only) */}

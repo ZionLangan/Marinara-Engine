@@ -5,11 +5,16 @@ import {
   APP_LANGUAGE_OPTIONS,
   useUIStore,
   type GameDialogueDisplayMode,
-  type InstalledExtension,
   type RoleplayAvatarStyle,
   type VisualTheme,
 } from "../../stores/ui.store";
-import { cn, generateClientId } from "../../lib/utils";
+import { cn } from "../../lib/utils";
+import {
+  useExtensions,
+  useCreateExtension,
+  useDeleteExtension,
+  useUpdateExtension,
+} from "../../hooks/use-extensions";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ADMIN_SECRET_STORAGE_KEY, api, getAdminSecretHeader } from "../../lib/api-client";
 import { forceRefreshSpa } from "@/lib/browser-runtime";
@@ -2066,10 +2071,11 @@ const CSS_TEMPLATE = `/* ══════════════════�
 `;
 
 function ExtensionsSettings() {
-  const extensions = useUIStore((s) => s.installedExtensions);
-  const addExtension = useUIStore((s) => s.addExtension);
-  const removeExtension = useUIStore((s) => s.removeExtension);
-  const toggleExtension = useUIStore((s) => s.toggleExtension);
+  const { data: extensions, isLoading } = useExtensions();
+  const extensionList = extensions ?? [];
+  const createExtension = useCreateExtension();
+  const updateExtension = useUpdateExtension();
+  const deleteExtension = useDeleteExtension();
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleImportExtension = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2077,46 +2083,45 @@ function ExtensionsSettings() {
     if (!file) return;
     try {
       const text = await file.text();
+      const installedAt = new Date().toISOString();
 
       if (file.name.endsWith(".json")) {
         const parsed = JSON.parse(text);
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: parsed.name ?? file.name.replace(/\.json$/, ""),
+        const name = parsed.name ?? file.name.replace(/\.json$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: parsed.description ?? "",
-          css: parsed.css ?? undefined,
-          js: parsed.js ?? undefined,
+          css: parsed.css ?? null,
+          js: parsed.js ?? null,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
-        toast.success(`Extension "${ext.name}" installed`);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else if (file.name.endsWith(".js")) {
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: file.name.replace(/\.js$/, ""),
+        const name = file.name.replace(/\.js$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: "JS extension imported from file",
           js: text,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
-        toast.success(`Extension "${ext.name}" installed`);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else if (file.name.endsWith(".css")) {
-        const ext: InstalledExtension = {
-          id: generateClientId(),
-          name: file.name.replace(/\.css$/, ""),
+        const name = file.name.replace(/\.css$/, "");
+        await createExtension.mutateAsync({
+          name,
           description: "CSS extension imported from file",
           css: text,
           enabled: true,
-          installedAt: new Date().toISOString(),
-        };
-        addExtension(ext);
+          installedAt,
+        });
+        toast.success(`Extension "${name}" installed`);
       } else {
-        toast.error("Only .json and .css extension files are supported.");
+        toast.error("Only .json, .css, and .js extension files are supported.");
       }
-    } catch {
-      toast.error("Failed to import extension.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to import extension.");
     }
     e.target.value = "";
   };
@@ -2141,7 +2146,7 @@ function ExtensionsSettings() {
       <div className="flex flex-col gap-1.5">
         <span className="text-xs font-medium">Installed Extensions</span>
 
-        {extensions.map((ext) => (
+        {extensionList.map((ext) => (
           <div
             key={ext.id}
             className={cn(
@@ -2152,7 +2157,7 @@ function ExtensionsSettings() {
             )}
           >
             <button
-              onClick={() => toggleExtension(ext.id)}
+              onClick={() => updateExtension.mutate({ id: ext.id, enabled: !ext.enabled })}
               className={cn(
                 "rounded p-0.5 transition-colors",
                 ext.enabled
@@ -2170,7 +2175,7 @@ function ExtensionsSettings() {
               )}
             </div>
             <button
-              onClick={() => removeExtension(ext.id)}
+              onClick={() => deleteExtension.mutate(ext.id)}
               className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
               title="Remove extension"
             >
@@ -2179,9 +2184,9 @@ function ExtensionsSettings() {
           </div>
         ))}
 
-        {extensions.length === 0 && (
+        {!isLoading && extensionList.length === 0 && (
           <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-            No extensions installed. Import a .json or .css extension file above.
+            No extensions installed. Import a .json, .css, or .js extension file above.
           </p>
         )}
       </div>

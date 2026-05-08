@@ -108,17 +108,29 @@ async function buildCharacterContext(chars: ReturnType<typeof createCharactersSt
   return ctx;
 }
 
-/** Build persona context. */
-async function buildPersonaContext(chars: ReturnType<typeof createCharactersStorage>) {
+/**
+ * Build persona context. Prefers the chat-scoped persona (`chat.personaId`)
+ * before falling back to the globally active persona — mirrors the same
+ * resolution order used elsewhere (see `chats.routes.ts`). Without this, a
+ * user who picks a per-chat persona but doesn't have a matching global active
+ * persona ends up named "User" in combat because the encounter prompt's
+ * `${personaName}` placeholder defaulted to that string.
+ */
+async function buildPersonaContext(
+  chars: ReturnType<typeof createCharactersStorage>,
+  chatPersonaId: string | null,
+) {
   const allPersonas = await chars.listPersonas();
-  const active = allPersonas.find((p) => p.isActive === "true");
-  if (!active) return { personaName: "User", personaCtx: "No persona information available." };
-  let ctx = `Name: ${active.name}\n`;
-  if (active.description) ctx += `${active.description}\n`;
-  if (active.personality) ctx += `${active.personality}\n`;
-  if (active.backstory) ctx += `${active.backstory}\n`;
-  if (active.appearance) ctx += `${active.appearance}\n`;
-  return { personaName: active.name, personaCtx: ctx };
+  const persona =
+    (chatPersonaId ? allPersonas.find((p) => p.id === chatPersonaId) : null) ??
+    allPersonas.find((p) => p.isActive === "true");
+  if (!persona) return { personaName: "User", personaCtx: "No persona information available." };
+  let ctx = `Name: ${persona.name}\n`;
+  if (persona.description) ctx += `${persona.description}\n`;
+  if (persona.personality) ctx += `${persona.personality}\n`;
+  if (persona.backstory) ctx += `${persona.backstory}\n`;
+  if (persona.appearance) ctx += `${persona.appearance}\n`;
+  return { personaName: persona.name, personaCtx: ctx };
 }
 
 /** Get the latest game state context string for the chat. */
@@ -442,7 +454,7 @@ export async function encounterRoutes(app: FastifyInstance) {
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);
-      const { personaName, personaCtx } = await buildPersonaContext(chars);
+      const { personaName, personaCtx } = await buildPersonaContext(chars, chat.personaId ?? null);
       const gameStateCtx = await buildGameStateContext(gsStorage, chatId, personaName);
       const spellbookCtx = await loadSpellbookContext(spellbookId);
 
@@ -508,7 +520,7 @@ export async function encounterRoutes(app: FastifyInstance) {
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);
-      const { personaName, personaCtx } = await buildPersonaContext(chars);
+      const { personaName, personaCtx } = await buildPersonaContext(chars, chat.personaId ?? null);
       const spellbookCtx = await loadSpellbookContext(spellbookId);
 
       const chatMessages = await chats.listMessages(chatId);
@@ -606,7 +618,7 @@ export async function encounterRoutes(app: FastifyInstance) {
 
       const characterIds: string[] = JSON.parse(chat.characterIds as string);
       const characterCtx = await buildCharacterContext(chars, characterIds);
-      const { personaName, personaCtx } = await buildPersonaContext(chars);
+      const { personaName, personaCtx } = await buildPersonaContext(chars, chat.personaId ?? null);
 
       const prompt = buildSummaryPrompt(
         personaName,

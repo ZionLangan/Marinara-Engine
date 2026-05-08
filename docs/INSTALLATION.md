@@ -11,4 +11,5 @@ Each guide includes installation steps and the relevant update instructions for 
 
 - 📖 [Configuration Reference](CONFIGURATION.md) — environment variables and `.env` setup
 - ❓ [FAQ](FAQ.md) — frequently asked questions (LAN access, etc.)
+- 🎓 [Professor Mari](PROFESSOR_MARI.md) — built-in assistant capabilities and limits
 - 🔧 [Troubleshooting](TROUBLESHOOTING.md) — common issues and fixes

@@ -68,6 +68,60 @@ function parseCharacterRowData(raw: unknown): Record<string, unknown> | null {
   return null;
 }
 
+type CachedCharacterRow = {
+  id?: string;
+  data?: unknown;
+  avatarPath?: string | null;
+  name?: string;
+};
+
+function resolveCachedCharacterIdentity(
+  qc: QueryClient,
+  characterId: string | null | undefined,
+  fallbackName: string | null | undefined = "Character",
+): {
+  name: string | null;
+  avatarUrl: string | null;
+  avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null;
+} {
+  if (!characterId) return { name: fallbackName, avatarUrl: null };
+
+  const detail = qc.getQueryData<CachedCharacterRow>(characterKeys.detail(characterId));
+  const list = qc.getQueryData<CachedCharacterRow[]>(characterKeys.list());
+  const row = detail ?? list?.find((character) => character.id === characterId);
+  const parsed = parseCharacterRowData(row?.data);
+  const name =
+    (parsed && typeof parsed.name === "string" && parsed.name.trim()) ||
+    (typeof row?.name === "string" && row.name.trim()) ||
+    fallbackName ||
+    "Character";
+  const avatarCrop =
+    parsed &&
+    typeof parsed.extensions === "object" &&
+    parsed.extensions &&
+    "avatarCrop" in parsed.extensions
+      ? ((parsed.extensions as { avatarCrop?: { zoom: number; offsetX: number; offsetY: number } | null }).avatarCrop ??
+        null)
+      : null;
+
+  return {
+    name,
+    avatarUrl: row?.avatarPath ?? null,
+    avatarCrop,
+  };
+}
+
+function latestAssistantMessage(messages: Iterable<Message>): Message | null {
+  let latest: Message | null = null;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    if (!latest || new Date(message.createdAt).getTime() >= new Date(latest.createdAt).getTime()) {
+      latest = message;
+    }
+  }
+  return latest;
+}
+
 /**
  * Build one or more PendingCardUpdate batches from a character_card_update
  * agent result. Each batch is scoped to a single characterId so the approval
@@ -293,6 +347,15 @@ function parseChatMetadata(metadata: Chat["metadata"] | string | null | undefine
   return metadata as Record<string, unknown>;
 }
 
+function getCachedChatMode(qc: QueryClient, chatId: string): Chat["mode"] | undefined {
+  const detail = qc.getQueryData<Chat>(chatKeys.detail(chatId));
+  if (detail?.mode) return detail.mode;
+  const activeChat = useChatStore.getState().activeChat;
+  if (activeChat?.id === chatId) return activeChat.mode;
+  const list = qc.getQueryData<Chat[]>(chatKeys.list());
+  return list?.find((chat) => chat.id === chatId)?.mode;
+}
+
 function slugifyGameMapId(value: string): string {
   return value
     .trim()
@@ -397,6 +460,10 @@ export function useGenerate() {
       forCharacterId?: string;
       generationGuide?: string;
       pendingSkillCheck?: { skill: string; tier: string } | null;
+      impersonatePresetId?: string;
+      impersonateConnectionId?: string;
+      impersonateBlockAgents?: boolean;
+      impersonatePromptTemplate?: string;
     }) => {
       // Prevent concurrent generations for the same chat. Different chats may
       // keep generating in the background while the user navigates elsewhere.
@@ -508,6 +575,8 @@ export function useGenerate() {
       // Speed is controlled by the user's streamingSpeed setting (1–100).
       const transportStreaming = useUIStore.getState().enableStreaming;
       const streamingEnabled = transportStreaming;
+      const shouldDisplayRawStream =
+        getCachedChatMode(qc, params.chatId) !== "conversation" || !!params.regenerateMessageId;
       let fullBuffer = ""; // What the user sees (or accumulates silently when streaming is off)
       let pendingText = ""; // Tokens waiting to be typed out
       let receivedContent = false; // Whether any actual message content was received
@@ -562,7 +631,7 @@ export function useGenerate() {
         fullBuffer += pendingText;
         pendingText = "";
         typingActive = false;
-        if (streamingEnabled && fullBuffer) setStreamBuffer(fullBuffer, params.chatId);
+        if (streamingEnabled && shouldDisplayRawStream && fullBuffer) setStreamBuffer(fullBuffer, params.chatId);
       };
 
       const startTypewriter = () => {
@@ -693,7 +762,7 @@ export function useGenerate() {
 
               if (!chunk) break;
 
-              if (streamingEnabled) {
+              if (streamingEnabled && shouldDisplayRawStream) {
                 pendingText += chunk;
                 startTypewriter();
               } else {
@@ -925,25 +994,23 @@ export function useGenerate() {
                     startTypewriter();
                   });
                 }
+                const previousGroupMessage = latestAssistantMessage(persistedMessages.values());
+
                 // Pick up the just-saved message from the previous character
                 await refreshMessagesAuthoritatively(qc, params.chatId, persistedMessages.values());
                 // Increment unread if user navigated away during group generation
                 const activeNow = useChatStore.getState().activeChatId;
                 if (activeNow !== params.chatId) {
                   useChatStore.getState().incrementUnread(params.chatId);
-                  // Show floating avatar notification bubble
-                  const charDetail = qc.getQueryData<{ avatarPath?: string | null }>(
-                    characterKeys.detail(turn.characterId),
+                  const identity = resolveCachedCharacterIdentity(
+                    qc,
+                    previousGroupMessage?.characterId ?? null,
+                    (previousGroupMessage as (Message & { characterName?: string | null }) | null)?.characterName ??
+                      null,
                   );
-                  // Detail cache may be empty — fall back to list cache
-                  let avatarPath = charDetail?.avatarPath ?? null;
-                  if (!avatarPath) {
-                    const charList = qc.getQueryData<Array<{ id: string; avatarPath?: string | null }>>(
-                      characterKeys.list(),
-                    );
-                    avatarPath = charList?.find((c) => c.id === turn.characterId)?.avatarPath ?? null;
-                  }
-                  useChatStore.getState().addNotification(params.chatId, turn.characterName, avatarPath);
+                  useChatStore
+                    .getState()
+                    .addNotification(params.chatId, identity.name ?? "Character", identity.avatarUrl, identity.avatarCrop);
                   const chatList = qc.getQueryData<Chat[]>(chatKeys.list());
                   const thisChat = chatList?.find((c) => c.id === params.chatId);
                   const isRpMode = thisChat?.mode === "roleplay" || thisChat?.mode === "visual_novel";
@@ -1031,7 +1098,7 @@ export function useGenerate() {
                   }
                 }
                 fullBuffer = rw.editedText;
-                if (streamingEnabled) setStreamBuffer(rw.editedText, params.chatId);
+                if (streamingEnabled && shouldDisplayRawStream) setStreamBuffer(rw.editedText, params.chatId);
               }
               break;
             }
@@ -1045,7 +1112,7 @@ export function useGenerate() {
                 typingActive = false;
               }
               fullBuffer = cleanContent;
-              if (streamingEnabled) setStreamBuffer(cleanContent, params.chatId);
+              if (streamingEnabled && shouldDisplayRawStream) setStreamBuffer(cleanContent, params.chatId);
               break;
             }
 
@@ -1298,7 +1365,7 @@ export function useGenerate() {
         }
 
         // Wait for typewriter to finish draining pending text (streaming mode only)
-        if (streamingEnabled && isActiveChat() && (pendingText.length > 0 || typingActive)) {
+        if (streamingEnabled && shouldDisplayRawStream && isActiveChat() && (pendingText.length > 0 || typingActive)) {
           await new Promise<void>((resolve) => {
             if (pendingText.length === 0 && !typingActive) {
               resolve();
@@ -1309,7 +1376,7 @@ export function useGenerate() {
           });
         }
         // Final flush — ensure full content is set (only for the viewed chat)
-        if (streamingEnabled) setStreamBuffer(fullBuffer + pendingText, params.chatId);
+        if (streamingEnabled && shouldDisplayRawStream) setStreamBuffer(fullBuffer + pendingText, params.chatId);
       } catch (error) {
         // Flush everything instantly on error so user sees what arrived
         flushTypewriterBuffer();
@@ -1362,32 +1429,13 @@ export function useGenerate() {
               : Array.isArray(rawIds)
                 ? rawIds
                 : [];
-          const firstCharId = parsedIds[0];
-          if (firstCharId) {
-            const charDetail = qc.getQueryData<{ data?: { name?: string } | string; avatarPath?: string | null }>(
-              characterKeys.detail(firstCharId),
-            );
-            // Detail cache may be empty — fall back to the always-populated list cache
-            let charAvatar = charDetail?.avatarPath ?? null;
-            let charName = "Character";
-            if (charDetail) {
-              const parsed = typeof charDetail.data === "string" ? JSON.parse(charDetail.data) : charDetail.data;
-              charName = parsed?.name ?? "Character";
-            }
-            if (!charAvatar || charName === "Character") {
-              const charList = qc.getQueryData<
-                Array<{ id: string; data?: string | { name?: string }; avatarPath?: string | null }>
-              >(characterKeys.list());
-              const fromList = charList?.find((c) => c.id === firstCharId);
-              if (fromList) {
-                if (!charAvatar) charAvatar = fromList.avatarPath ?? null;
-                if (charName === "Character") {
-                  const p = typeof fromList.data === "string" ? JSON.parse(fromList.data) : fromList.data;
-                  charName = p?.name ?? "Character";
-                }
-              }
-            }
-            useChatStore.getState().addNotification(params.chatId, charName, charAvatar);
+          const notifiedMessage = latestAssistantMessage(persistedMessages.values());
+          const notifiedCharacterId = notifiedMessage?.characterId ?? parsedIds[0] ?? null;
+          if (notifiedCharacterId) {
+            const identity = resolveCachedCharacterIdentity(qc, notifiedCharacterId);
+            useChatStore
+              .getState()
+              .addNotification(params.chatId, identity.name ?? "Character", identity.avatarUrl, identity.avatarCrop);
           }
           const isRp = chat?.mode === "roleplay" || chat?.mode === "visual_novel";
           const soundEnabled = isRp
@@ -1517,7 +1565,15 @@ export function useGenerate() {
   );
 
   const retryAgents = useCallback(
-    async (chatId: string, agentTypes: string[], options?: { lorebookKeeperBackfill?: boolean }) => {
+    async (
+      chatId: string,
+      agentTypes: string[],
+      options?: {
+        lorebookKeeperBackfill?: boolean;
+        forMessageId?: string;
+        secretPlotRerollMode?: "full" | "turn_only";
+      },
+    ) => {
       const isActiveChat = () => useChatStore.getState().activeChatId === chatId;
       const abortController = new AbortController();
       useChatStore.getState().setAbortController(chatId, abortController);
@@ -1534,6 +1590,8 @@ export function useGenerate() {
             agentTypes,
             streaming: useUIStore.getState().enableStreaming,
             lorebookKeeperBackfill: options?.lorebookKeeperBackfill === true,
+            ...(options?.forMessageId ? { forMessageId: options.forMessageId } : {}),
+            ...(options?.secretPlotRerollMode ? { secretPlotRerollMode: options.secretPlotRerollMode } : {}),
           },
           abortController.signal,
         )) {

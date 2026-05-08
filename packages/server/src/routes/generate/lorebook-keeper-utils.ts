@@ -226,6 +226,24 @@ function normalizeKeeperFacts(value: unknown): string[] {
   return facts;
 }
 
+function dedupeKeeperContentParagraphs(content: string): string {
+  const paragraphs = content
+    .split(/\r?\n\s*\r?\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const paragraph of paragraphs) {
+    const comparable = normalizeKeeperFactForComparison(paragraph);
+    if (!comparable || seen.has(comparable)) continue;
+    seen.add(comparable);
+    deduped.push(paragraph);
+  }
+
+  return deduped.join("\n\n");
+}
+
 function mergeLorebookKeys(existingKeys: unknown, newKeys: string[]): string[] {
   const merged: string[] = [];
   const seen = new Set<string>();
@@ -251,8 +269,10 @@ export function mergeLorebookKeeperUpdateContent(args: {
   replacementContent: unknown;
   newFacts: unknown;
 }): string {
-  const existing = typeof args.existingContent === "string" ? args.existingContent.trim() : "";
-  const replacement = typeof args.replacementContent === "string" ? args.replacementContent.trim() : "";
+  const existing =
+    typeof args.existingContent === "string" ? dedupeKeeperContentParagraphs(args.existingContent) : "";
+  const replacement =
+    typeof args.replacementContent === "string" ? dedupeKeeperContentParagraphs(args.replacementContent) : "";
   const facts = normalizeKeeperFacts(args.newFacts);
 
   if (facts.length === 0) {
@@ -264,10 +284,11 @@ export function mergeLorebookKeeperUpdateContent(args: {
     if (replacementComparable.includes(existingComparable)) return replacement;
     if (existingComparable.includes(replacementComparable)) return existing;
 
-    return `${existing}\n\n${replacement}`;
+    return dedupeKeeperContentParagraphs(`${existing}\n\n${replacement}`);
   }
 
-  const baseContent = existing || replacement;
+  const baseContent =
+    existing && replacement ? dedupeKeeperContentParagraphs(`${existing}\n\n${replacement}`) : existing || replacement;
   const existingComparable = normalizeKeeperFactForComparison(baseContent);
   const novelFacts = facts.filter((fact) => {
     const comparable = normalizeKeeperFactForComparison(fact);

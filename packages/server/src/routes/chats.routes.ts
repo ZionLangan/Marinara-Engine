@@ -20,15 +20,186 @@ import { createRegexScriptsStorage } from "../services/storage/regex-scripts.sto
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../services/llm/local-sidecar.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { generateMissingConversationSummaries } from "../services/conversation/auto-summary.service.js";
+import { rebuildMemoryChunks } from "../services/memory-recall.js";
 import { wrapContent } from "../services/prompt/format-engine.js";
 import { newId } from "../utils/id-generator.js";
-import { characters, memoryChunks } from "../db/schema/index.js";
+import { characters, gameStateSnapshots, memoryChunks } from "../db/schema/index.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { existsSync } from "fs";
 import { join } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
-import { parseExtra } from "./generate/generate-route-utils.js";
+import { findLastIndex, parseExtra, shouldEnableAgentsForGeneration } from "./generate/generate-route-utils.js";
+
+type TrackerWrapFormat = "xml" | "markdown" | "none";
+type EntryStateOverrides = Record<string, { ephemeral?: number | null; enabled?: boolean }>;
+
+async function loadLatestChatGameSnapshot(app: FastifyInstance, chatId: string) {
+  const committedRows = await app.db
+    .select()
+    .from(gameStateSnapshots)
+    .where(and(eq(gameStateSnapshots.chatId, chatId), eq(gameStateSnapshots.committed, 1)))
+    .orderBy(desc(gameStateSnapshots.createdAt))
+    .limit(1);
+
+  let snap = committedRows[0];
+  if (!snap) {
+    const anyRows = await app.db
+      .select()
+      .from(gameStateSnapshots)
+      .where(eq(gameStateSnapshots.chatId, chatId))
+      .orderBy(desc(gameStateSnapshots.createdAt))
+      .limit(1);
+    snap = anyRows[0];
+  }
+
+  return snap ?? null;
+}
+
+function formatPeekTrackerContextBlock(args: {
+  wrapFormat: TrackerWrapFormat;
+  snap: typeof gameStateSnapshots.$inferSelect;
+  chatMeta: Record<string, unknown>;
+  activeAgentIds: string[];
+}): string | null {
+  const { wrapFormat, snap, chatMeta, activeAgentIds } = args;
+  const active = new Set(activeAgentIds);
+  const hasWorldState = active.has("world-state");
+  const hasCharTracker = active.has("character-tracker");
+  const hasPersonaStats = active.has("persona-stats");
+  const hasQuest = active.has("quest");
+  const hasCustomTracker = active.has("custom-tracker");
+
+  if (!hasWorldState && !hasCharTracker && !hasPersonaStats && !hasQuest && !hasCustomTracker) return null;
+
+  const trackerParts: string[] = [];
+
+  if (hasWorldState) {
+    const wsParts: string[] = [];
+    if (snap.date) wsParts.push(`Date: ${snap.date}`);
+    if (snap.time) wsParts.push(`Time: ${snap.time}`);
+    if (snap.location) wsParts.push(`Location: ${snap.location}`);
+    if (snap.weather) wsParts.push(`Weather: ${snap.weather}`);
+    if (snap.temperature) wsParts.push(`Temperature: ${snap.temperature}`);
+    if (wsParts.length > 0) trackerParts.push(wrapContent(wsParts.join("\n"), "World", wrapFormat));
+  }
+
+  if (hasCharTracker) {
+    try {
+      const presentChars = JSON.parse(snap.presentCharacters);
+      if (Array.isArray(presentChars) && presentChars.length > 0) {
+        const charLines = presentChars.map((c: any) => {
+          if (typeof c === "string") return `- ${c}`;
+          const details: string[] = [];
+          if (c.mood) details.push(`mood: ${c.mood}`);
+          if (c.appearance) details.push(`appearance: ${c.appearance}`);
+          if (c.outfit) details.push(`outfit: ${c.outfit}`);
+          if (c.thoughts) details.push(`thoughts: ${c.thoughts}`);
+          if (Array.isArray(c.stats) && c.stats.length > 0) {
+            const statStr = c.stats.map((s: any) => `${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`).join(", ");
+            details.push(`stats: ${statStr}`);
+          }
+          const detailStr = details.length > 0 ? ` (${details.join("; ")})` : "";
+          return `- ${c.emoji ?? ""} ${c.name ?? c}${detailStr}`;
+        });
+        trackerParts.push(wrapContent(charLines.join("\n"), "Present Characters", wrapFormat));
+      }
+    } catch {
+      /* ignore malformed tracker data */
+    }
+  }
+
+  if (hasPersonaStats && snap.personaStats) {
+    try {
+      const psBars = typeof snap.personaStats === "string" ? JSON.parse(snap.personaStats) : snap.personaStats;
+      if (Array.isArray(psBars) && psBars.length > 0) {
+        const barLines = psBars.map((b: any) => `- ${b.name}: ${b.value}/${b.max}`);
+        trackerParts.push(wrapContent(barLines.join("\n"), "Persona Stats", wrapFormat));
+      }
+    } catch {
+      /* ignore malformed tracker data */
+    }
+  }
+
+  if (snap.playerStats) {
+    try {
+      const stats = typeof snap.playerStats === "string" ? JSON.parse(snap.playerStats) : snap.playerStats;
+
+      if (hasPersonaStats && stats?.status) trackerParts.push(wrapContent(`Status: ${stats.status}`, "Status", wrapFormat));
+
+      if (hasQuest && Array.isArray(stats?.activeQuests) && stats.activeQuests.length > 0) {
+        const questLines = stats.activeQuests.map((q: any) => {
+          const objectives = Array.isArray(q.objectives)
+            ? q.objectives.map((o: any) => `  ${o.completed ? "[x]" : "[ ]"} ${o.text}`).join("\n")
+            : "";
+          return `- ${q.name}${q.completed ? " (completed)" : ""}${objectives ? "\n" + objectives : ""}`;
+        });
+        trackerParts.push(wrapContent(questLines.join("\n"), "Active Quests", wrapFormat));
+      }
+
+      if (hasPersonaStats && Array.isArray(stats?.inventory) && stats.inventory.length > 0) {
+        const invLines = stats.inventory.map(
+          (item: any) =>
+            `- ${item.name}${item.quantity > 1 ? ` x${item.quantity}` : ""}${item.description ? ` — ${item.description}` : ""}`,
+        );
+        trackerParts.push(wrapContent(invLines.join("\n"), "Inventory", wrapFormat));
+      }
+
+      if (hasPersonaStats && Array.isArray(stats?.stats) && stats.stats.length > 0) {
+        const statLines = stats.stats.map((s: any) => `- ${s.name}: ${s.value}${s.max ? `/${s.max}` : ""}`);
+        trackerParts.push(wrapContent(statLines.join("\n"), "Stats", wrapFormat));
+      }
+
+      if (hasCustomTracker && Array.isArray(stats?.customTrackerFields) && stats.customTrackerFields.length > 0) {
+        const customLines = stats.customTrackerFields.map((f: any) => `- ${f.name}: ${f.value}`);
+        trackerParts.push(wrapContent(customLines.join("\n"), "Custom Tracker", wrapFormat));
+      }
+    } catch {
+      /* ignore malformed tracker data */
+    }
+  }
+
+  const playerNotes = typeof chatMeta.gamePlayerNotes === "string" ? chatMeta.gamePlayerNotes.trim() : "";
+  if (playerNotes) {
+    trackerParts.push(
+      wrapContent(
+        `The player has written these personal notes. Consider them when narrating — they reflect what the player is tracking, their theories, and plans:\n${playerNotes}`,
+        "Player Notes",
+        wrapFormat,
+      ),
+    );
+  }
+
+  if (trackerParts.length <= 0) return null;
+  if (wrapFormat === "none") return trackerParts.join("\n\n");
+  if (wrapFormat === "xml") {
+    return `<context>\n${trackerParts.map((part) => "    " + part.replace(/\n/g, "\n    ")).join("\n")}\n</context>`;
+  }
+  return `# Context\n*(Established state as of the last message. Do not re-describe — advance from here.)*\n${trackerParts.join("\n")}`;
+}
+
+function resolveLorebookGenerationTriggers(mode: unknown): string[] {
+  const modeTrigger = mode === "game" ? "game" : typeof mode === "string" && mode.trim() ? mode.trim() : "roleplay";
+  return Array.from(new Set([modeTrigger, "chat"]));
+}
+
+function resolveEntryStateOverrides(value: unknown): EntryStateOverrides | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+
+  const overrides: EntryStateOverrides = {};
+  for (const [entryId, override] of Object.entries(value)) {
+    if (typeof override !== "object" || override === null || Array.isArray(override)) return undefined;
+    const { ephemeral, enabled } = override as Record<string, unknown>;
+    if (ephemeral !== undefined && ephemeral !== null && typeof ephemeral !== "number") return undefined;
+    if (enabled !== undefined && typeof enabled !== "boolean") return undefined;
+    overrides[entryId] = {
+      ...(ephemeral !== undefined ? { ephemeral } : {}),
+      ...(enabled !== undefined ? { enabled } : {}),
+    };
+  }
+
+  return overrides;
+}
 
 export async function chatsRoutes(app: FastifyInstance) {
   const storage = createChatsStorage(app.db);
@@ -419,6 +590,39 @@ export async function chatsRoutes(app: FastifyInstance) {
     );
   });
 
+  // Rebuild memory-recall chunks for this chat from the current message log.
+  app.post<{ Params: { id: string } }>("/:id/memories/refresh", async (req, reply) => {
+    const chat = await storage.getById(req.params.id);
+    if (!chat) return reply.status(404).send({ error: "Chat not found" });
+
+    const characterIds: string[] = Array.isArray(chat.characterIds)
+      ? chat.characterIds
+      : typeof chat.characterIds === "string"
+        ? JSON.parse(chat.characterIds)
+        : [];
+    const charactersStore = createCharactersStorage(app.db);
+    const characterNames: Record<string, string> = {};
+    for (const characterId of characterIds) {
+      const row = await charactersStore.getById(characterId);
+      if (!row) continue;
+      try {
+        const data = JSON.parse(row.data as string) as { name?: unknown };
+        characterNames[characterId] = typeof data.name === "string" && data.name.trim() ? data.name : "Character";
+      } catch {
+        characterNames[characterId] = "Character";
+      }
+    }
+
+    const personas = await charactersStore.listPersonas();
+    const persona =
+      (chat.personaId ? personas.find((candidate) => candidate.id === chat.personaId) : null) ??
+      personas.find((candidate) => candidate.isActive === "true");
+    const userName = persona?.name ?? "User";
+
+    const rebuilt = await rebuildMemoryChunks(app.db, req.params.id, { userName, characterNames });
+    return { rebuilt };
+  });
+
   // Clear all memory-recall chunks for this chat.
   app.delete<{ Params: { id: string } }>("/:id/memories", async (req, reply) => {
     const chat = await storage.getById(req.params.id);
@@ -717,7 +921,7 @@ export async function chatsRoutes(app: FastifyInstance) {
 
     // ── Fallback: live assembly preview (no generation has happened yet) ──
     // This is a best-effort approximation; it won't include runtime-only
-    // injections like lorebooks, game state, scene context, semantic memory, etc.
+    // injections like cached game state, scene context, semantic memory, etc.
     const presetId = chat.mode === "conversation" ? null : (chat.promptPresetId ?? chatMeta.presetId);
     if (presetId) {
       try {
@@ -881,6 +1085,7 @@ export async function chatsRoutes(app: FastifyInstance) {
             chatId: req.params.id,
           });
           const resolvePromptMacros = (value: string) => resolveMacros(value, promptMacroContext);
+          const entryStateOverrides = resolveEntryStateOverrides(chatMeta.entryStateOverrides);
 
           const assembled = await assemblePrompt({
             db: app.db,
@@ -903,6 +1108,8 @@ export async function chatsRoutes(app: FastifyInstance) {
             activeLorebookIds: Array.isArray(chatMeta.activeLorebookIds)
               ? (chatMeta.activeLorebookIds as string[])
               : [],
+            entryStateOverrides,
+            generationTriggers: resolveLorebookGenerationTriggers(chat.mode),
             groupScenarioOverrideText:
               typeof chatMeta.groupScenarioText === "string" && (chatMeta.groupScenarioText as string).trim()
                 ? (chatMeta.groupScenarioText as string).trim()
@@ -1136,6 +1343,30 @@ export async function chatsRoutes(app: FastifyInstance) {
                 const firstUserIdx = assembled.messages.findIndex((m) => m.role === "user" || m.role === "assistant");
                 const insertAt = firstUserIdx >= 0 ? firstUserIdx : assembled.messages.length;
                 assembled.messages.splice(insertAt, 0, { role: "system", content: block });
+              }
+            }
+          }
+
+          // ── Tracker context fallback: mirror the read-only snapshot injection from /api/generate ──
+          const activeAgentIds = Array.isArray(chatMeta.activeAgentIds) ? (chatMeta.activeAgentIds as string[]) : [];
+          const chatEnableAgents = shouldEnableAgentsForGeneration({
+            chatEnableAgents: chatMeta.enableAgents === true,
+            chatMode,
+            impersonate: false,
+            impersonateBlockAgents: false,
+          });
+          if (chatEnableAgents && activeAgentIds.length > 0) {
+            const snap = await loadLatestChatGameSnapshot(app, req.params.id);
+            const contextBlock = snap
+              ? formatPeekTrackerContextBlock({ wrapFormat, snap, chatMeta, activeAgentIds })
+              : null;
+
+            if (contextBlock) {
+              const lastUserIdx = findLastIndex(assembled.messages, "user");
+              if (lastUserIdx >= 0) {
+                assembled.messages.splice(lastUserIdx, 0, { role: "system", content: contextBlock });
+              } else {
+                assembled.messages.splice(0, 0, { role: "system", content: contextBlock });
               }
             }
           }
